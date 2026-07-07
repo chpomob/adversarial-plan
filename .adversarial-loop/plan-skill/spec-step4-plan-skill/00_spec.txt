@@ -1,0 +1,112 @@
+# Step 4: adversarial-plan — full skill
+
+## Objective
+Create the adversarial-plan skill. Takes a spec.md (optionally + review findings.json) and produces a plan.md consumable by adversarial-code-loop v4.
+
+## Location
+`~/.hermes/skills/adversarial-plan/`
+
+## Structure
+```
+adversarial-plan/
+├── scripts/
+│   ├── __init__.py
+│   ├── adversarial_plan.py      ← orchestrateur
+│   └── phases/
+│       ├── __init__.py
+│       ├── phase_plan.py         ← plan-writer écrit plan.md
+│       ├── phase_challenge.py    ← plan-challenger challenge
+│       ├── phase_revise.py       ← plan-writer corrige
+│       └── phase_verify.py       ← vérifie les findings
+├── tests/
+├── SKILL.md
+└── _retrospective/
+```
+
+## Reuse from adversarial-common
+- `gitops.py` — branche, commit, diff, squash
+- `providers.py`, `jsonio.py`
+- `personas/plan-writer.md` and `personas/plan-challenger.md` (step 3)
+
+## Phases (same pattern as adversarial-spec)
+
+PHASE 0 — GIT SETUP (identique, auto)
+PHASE 1 — PLAN (DEV): plan-writer lit spec.md, écrit plan.md
+PHASE 2 — CHALLENGE (REVIEW): plan-challenger challenge plan.md
+PHASE 3 — REVISE (FIX): plan-writer corrige selon findings
+PHASE 4 — VERIFY: vérifie les findings résolus → APPROVED / REJECT
+
+## CLI
+```
+python3 scripts/adversarial_plan.py \
+  --spec <file>              # spec.md à planifier
+  --findings <file>          # findings.json optionnel (de review)
+  --dev-cmd <cmd>            # plan-writer (default: pi ... glm-5.2)
+  --review-cmd <cmd>         # plan-challenger (default: pi ... deepseek)
+  --workdir <dir>            # default: .
+  --max-loops <N>            # default: 2
+  --feature <name>           # default: from spec filename
+  --timeout <N>              # default: 600
+  --out <dir>                # default: .adversarial-plan
+  --no-merge
+```
+
+## adversarial_plan.py
+
+Copy the pattern from adversarial_spec.py (which itself copies from adversarial_loop.py):
+
+1. argparse (same flags but --spec + --findings instead of --brief)
+2. Import gitops, providers, jsonio from adversarial-common
+3. Import phase modules from scripts/phases/
+4. Read spec.md (and optionally findings.json) from workdir
+5. Loop: plan → challenge → revise → verify
+6. Squash-merge or [REJECTED]
+7. Retrospective logging
+8. Output plan.md + final.json
+
+Key differences from adversarial_spec.py:
+- Takes --spec instead of --brief
+- Optionally takes --findings for review findings
+- Passes spec + findings to plan-writer
+- Output is plan.md (not spec.md)
+- Same exit codes (0=APPROVED, 1=infra, 2=usage, 3=REJECTED)
+
+## Phase modules
+
+### phase_plan.py
+```python
+def run_plan(spec_text, findings, dev_cmd, workdir, timeout, feature, providers):
+    """Run plan-writer model: reads spec.md, writes plan.md.
+    Returns {"phase": "plan", "exit_code": 0, "commit_sha": "..."}
+    """
+```
+
+### phase_challenge.py
+```python
+def run_challenge(dev_cmd, workdir, providers, jsonio):
+    """Run plan-challenger: reads plan.md, outputs JSON findings.
+    Returns {"phase": "challenge", "findings": [...], "verdict": "..."}
+    """
+```
+
+### phase_revise.py
+```python
+def run_revise(findings, dev_cmd, workdir, timeout, feature, loop_n, providers):
+    """Run plan-writer with findings to amend plan.md.
+    Returns {"phase": "revise", "exit_code": 0}
+    """
+```
+
+### phase_verify.py
+```python
+def run_verify(findings, dev_cmd, workdir, providers, jsonio):
+    """Run plan-challenger to verify findings resolved.
+    Returns {"phase": "verify", "results": [...], "verdict": "APPROVE|REJECT"}
+    """
+```
+
+## Rules
+1. Same pattern as adversarial_spec.py (phases, imports, git workflow)
+2. Use _try_parse_json from phase_verify.py for model-agnostic JSON parsing
+3. Git workflow identical to v4 (branch, commit, squash)
+4. ~250 lines for orchestrator
