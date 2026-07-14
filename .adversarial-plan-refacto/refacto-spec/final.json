@@ -1,0 +1,9 @@
+{
+  "verdict": "APPROVED",
+  "reason": "",
+  "loops": 1,
+  "branch": "plan/refacto-spec/1",
+  "merged": true,
+  "error": "",
+  "artifacts_dir": "/home/chpo/.hermes/skills/adversarial-plan/.adversarial-plan-refacto/refacto-spec"
+}

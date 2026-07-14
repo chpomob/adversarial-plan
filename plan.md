@@ -23,31 +23,14 @@ imports the shared helpers instead of duplicating them.
 ## Steps
 
 ### P1: Delete 4 unused persona files (Item 1)
-- **Files:**
-  - `/home/chpo/.hermes/skills/adversarial-common/personas/architect.md`
-  - `/home/chpo/.hermes/skills/adversarial-common/personas/inspector.md`
-  - `/home/chpo/.hermes/skills/adversarial-common/personas/synthesis.md`
-  - `/home/chpo/.hermes/skills/adversarial-common/personas/cross_review.md`
-- **Description:** Remove the four dead persona files. `adversarial_review.py`
-  uses `"architect"`, `"inspector"`, `"cross_review"`, `"synthesis"` only as role
-  strings; `persona_for_role` / `persona_path` resolve them via base-name fallback
-  and never opened these dedicated files. No code references the file paths.
+- **Files:** /home/chpo/.hermes/skills/adversarial-common/personas/architect.md, /home/chpo/.hermes/skills/adversarial-common/personas/inspector.md, /home/chpo/.hermes/skills/adversarial-common/personas/synthesis.md, /home/chpo/.hermes/skills/adversarial-common/personas/cross_review.md
+- **Description:** Remove the four dead persona files. adversarial_review.py uses architect, inspector, cross_review, and synthesis only as role names; no Python code references these file paths.
 - **Dependencies:** []
-- **Tests:** After deletion, run the multi-line check below; it must print `ok`:
-  ```
-  python3 -c "import sys; sys.path.insert(0,'/home/chpo/.hermes/skills/adversarial-common')
-  from adversarial_common import persona_path
-  try:
-      persona_path('architect'); print('FAIL: should raise')
-  except FileNotFoundError:
-      print('ok')"
-  ```
-  `persona_path` has **no** fallback — the role-to-persona fallback lives in `persona_for_role`, not `persona_path` — so removing the dedicated `architect.md` surfaces as `FileNotFoundError`, matching spec Item 1 verification. Also `grep -rn 'architect.md\|inspector.md\|synthesis.md\|cross_review.md' /home/chpo/.hermes/skills/adversarial-*/ --include='*.py'` returns no path references.
-- **Risks:** None — these roles never read their dedicated file; behavior is unchanged because `persona_path` already fell through to the shared `review`/`critic` base personas.
+- **Tests:** Assert persona_path("architect") raises FileNotFoundError, and grep all adversarial-skill Python files for references to the four deleted filenames.
+- **Risks:** None — the dedicated persona files are unused.
 
-### P2: Add shared structured-text helpers to jsonio.py + require PyYAML (Items 5-core, 6-core, 8)
-- **Files:**
-  - `/home/chpo/.hermes/skills/adversarial-common/adversarial_common/jsonio.py`
+### P2: Add shared structured-text helpers to jsonio.py + require PyYAML (Item 5, Item 6, Item 8)
+- **Files:** `/home/chpo/.hermes/skills/adversarial-common/adversarial_common/jsonio.py`
 - **Description:** Add four new public/semi-public functions plus a module-level
   regex, making PyYAML a hard dependency (it is already installed in this env):
   - `_FRONTMATTER_RE = re.compile(r"\A---[ \t]*\n(.*?)\n---[ \t]*(?:\n|\Z)", re.DOTALL)`
@@ -60,10 +43,7 @@ imports the shared helpers instead of duplicating them.
 - **Risks:** Low. Making PyYAML hard-required is safe here (verified present). If a future stripped-down environment lacks PyYAML, add it to requirements rather than resurrecting the regex.
 
 ### P3: Remove `fail_phase` alias and update all callers (Item 3)
-- **Files:**
-  - `/home/chpo/.hermes/skills/adversarial-common/adversarial_common/runner.py` (delete line 87 `fail_phase = _fail_phase`)
-  - `/home/chpo/.hermes/skills/adversarial-code-loop/scripts/adversarial_loop_v3.py` (line 21: change `from adversarial_common.runner import run_cli, fail_phase` → `from adversarial_common import runner` plus `from adversarial_common.runner import run_cli`; rename the 5 call sites `fail_phase(...)` → `runner._fail_phase(...)`)
-  - `/home/chpo/.hermes/skills/adversarial-code-review/scripts/adversarial_review.py` (line 271 `runner.fail_phase(...)` → `runner._fail_phase(...)`)
+- **Files:** `/home/chpo/.hermes/skills/adversarial-common/adversarial_common/runner.py` (delete line 87 `fail_phase = _fail_phase`), `/home/chpo/.hermes/skills/adversarial-code-loop/scripts/adversarial_loop_v3.py` (line 21: change `from adversarial_common.runner import run_cli, fail_phase` → `from adversarial_common import runner` plus `from adversarial_common.runner import run_cli`; rename the 5 call sites `fail_phase(...)` → `runner._fail_phase(...)`), `/home/chpo/.hermes/skills/adversarial-code-review/scripts/adversarial_review.py` (line 271 `runner.fail_phase(...)` → `runner._fail_phase(...)`)
 - **Description:** Delete the public alias in `runner.py`. The function stays
   private (`_fail_phase`). Update the two real callers so nothing imports the
   removed `fail_phase` symbol. Both callers now use the fully-qualified
@@ -83,20 +63,14 @@ imports the shared helpers instead of duplicating them.
 - **Risks:** Low. Any caller not found by the grep would NameError at runtime; the grep above is the guard.
 
 ### P4: Drop `dev_cmd` / `review_cmd` from `run_arbiter` signature (Item 2)
-- **Files:**
-  - `/home/chpo/.hermes/skills/adversarial-code-loop/scripts/phases/phase_arbiter.py` (function `run_arbiter`, currently at line 55)
-  - `/home/chpo/.hermes/skills/adversarial-code-loop/scripts/adversarial_loop.py` (call site at line 452)
-  - `/home/chpo/.hermes/skills/adversarial-code-loop/scripts/adversarial_loop_v4.py` (call site at line 437)
-  - `/home/chpo/.hermes/skills/adversarial-code-loop/scripts/phases/test_phases.py` (helper `_run_arbiter` at line 155)
+- **Files:** `/home/chpo/.hermes/skills/adversarial-code-loop/scripts/phases/phase_arbiter.py` (function `run_arbiter`, currently at line 55), `/home/chpo/.hermes/skills/adversarial-code-loop/scripts/adversarial_loop.py` (call site at line 452), `/home/chpo/.hermes/skills/adversarial-code-loop/scripts/adversarial_loop_v4.py` (call site at line 437), `/home/chpo/.hermes/skills/adversarial-code-loop/scripts/phases/test_phases.py` (helper `_run_arbiter` at line 155)
 - **Description:** Change `run_arbiter(findings, dev_cmd, review_cmd, arbiter_cmd, providers)` to `run_arbiter(findings, arbiter_cmd, providers)`. Update the docstring signature line. Remove the two unused positional args from every caller. Both `adversarial_loop.py` and `adversarial_loop_v4.py` currently pass the loop's dev/review commands positionally — drop those two args, keeping `arbiter_cmd` and `providers`. Update the test helper to call the new 3-arg form.
 - **Dependencies:** []
 - **Tests:** `python3 -c "import sys; sys.path.insert(0,'/home/chpo/.hermes/skills/adversarial-code-loop/scripts'); from phases.phase_arbiter import run_arbiter; import inspect; p=inspect.signature(run_arbiter).parameters; assert set(p)=={'findings','arbiter_cmd','providers'}, p; print('ok')"`. Run `python3 -m pytest phases/test_phases.py -k arbiter` from the code-loop scripts dir.
 - **Risks:** Low. A missed caller will TypeError on invocation (too many positional args) — the loop's arbiter path only fires after max-loops, so the test must exercise `_run_arbiter` to catch it before runtime.
 
 ### P5: Consolidate branch extraction into `gitops.get_current_branch` (Item 4)
-- **Files:**
-  - `/home/chpo/.hermes/skills/adversarial-code-loop/scripts/phases/phase_review.py` (inline `subprocess.run(["git","symbolic-ref","--short","HEAD"], ...)` inside `_build_prompt`)
-  - `/home/chpo/.hermes/skills/adversarial-code-loop/scripts/phases/phase_verify.py` (inline `subprocess.run(["git","symbolic-ref","--short","HEAD"], ...)` near top of `run_verify`)
+- **Files:** `/home/chpo/.hermes/skills/adversarial-code-loop/scripts/phases/phase_review.py` (inline `subprocess.run(["git","symbolic-ref","--short","HEAD"], ...)` inside `_build_prompt`), `/home/chpo/.hermes/skills/adversarial-code-loop/scripts/phases/phase_verify.py` (inline `subprocess.run(["git","symbolic-ref","--short","HEAD"], ...)` near top of `run_verify`)
 - **Description:** Replace both inline `subprocess.run(...)` blocks with
   `from adversarial_common import gitops` then `branch = gitops.get_current_branch(workdir)`,
   wrapped in `try/except gitops.GitError: branch = "(unknown)"`. In
@@ -110,8 +84,7 @@ imports the shared helpers instead of duplicating them.
 - **Risks:** Low. `gitops.get_current_branch` raises `GitError` on detached HEAD — same semantics as the inline `subprocess` failure path, now caught explicitly.
 
 ### P6: Route code-loop `phase_verify._try_parse_json` through `jsonio.parse_json_output` (Item 5, code-loop caller)
-- **Files:**
-  - `/home/chpo/.hermes/skills/adversarial-code-loop/scripts/phases/phase_verify.py`
+- **Files:** `/home/chpo/.hermes/skills/adversarial-code-loop/scripts/phases/phase_verify.py`
 - **Description:** Delete the local `_try_parse_json` function (and its dead
   `import ast`), import `from adversarial_common import jsonio`, and replace the
   one call site `payload = _try_parse_json(stdout)` with
@@ -123,8 +96,7 @@ imports the shared helpers instead of duplicating them.
 - **Risks:** Low. The two implementations are equivalent (same 3 strategies); `parse_json_output` returns None on failure, matching the old `_try_parse_json` contract used by `_validate`.
 
 ### P7: Route adversarial-spec `phases/__init__.py` through shared jsonio helpers (Items 5, 6 — spec caller)
-- **Files:**
-  - `/home/chpo/.hermes/skills/adversarial-spec/scripts/phases/__init__.py`
+- **Files:** `/home/chpo/.hermes/skills/adversarial-spec/scripts/phases/__init__.py`
 - **Description:** Remove the local `try_parse_json`, `extract_frontmatter`,
   `_parse_frontmatter`, and `_FRONTMATTER_RE` definitions. Add
   `from adversarial_common import jsonio` (alongside the existing
@@ -143,8 +115,7 @@ imports the shared helpers instead of duplicating them.
 - **Risks:** Low. If any other module in adversarial-spec imported the private `_parse_frontmatter` or `_FRONTMATTER_RE` directly, it breaks — guard with `grep -rn '_parse_frontmatter\|_FRONTMATTER_RE' /home/chpo/.hermes/skills/adversarial-spec/ --include='*.py'` before editing; expect only the one file.
 
 ### P8: Restore `--a-cmd` / `--b-cmd` / `--synth-cmd` flags in adversarial_review.py (Item 7)
-- **Files:**
-  - `/home/chpo/.hermes/skills/adversarial-code-review/scripts/adversarial_review.py`
+- **Files:** `/home/chpo/.hermes/skills/adversarial-code-review/scripts/adversarial_review.py`
 - **Description:** In `parse_args` (line 423) add three optional flags, each
   defaulting to `None`:
   `p.add_argument("--a-cmd", default=None, help="Architect review command (default: --review-cmd)")`,
@@ -167,9 +138,7 @@ imports the shared helpers instead of duplicating them.
 - **Risks:** Low — purely additive. Backward compat preserved: unset flags fall through to `--review-cmd`. Confirm `providers.resolve_role_cmd` signature supports the `default=` kwarg (it is used this way for `review` already, so it does).
 
 ### P9: Guard adversarial-plan against reintroducing the duplicated helpers (Items 5, 6 — plan caller)
-- **Files:**
-  - `/home/chpo/.hermes/skills/adversarial-plan/scripts/phases/__init__.py` (does not exist yet)
-  - `/home/chpo/.hermes/skills/adversarial-plan/.gitignore` (ensure the line `__pycache__/` is present — append it if the file lacks it; create the file if it does not yet exist)
+- **Files:** `/home/chpo/.hermes/skills/adversarial-plan/scripts/phases/__init__.py` (does not exist yet), `/home/chpo/.hermes/skills/adversarial-plan/.gitignore` (ensure the line `__pycache__/` is present — append it if the file lacks it; create the file if it does not yet exist)
 - **Description:** The adversarial-plan repo currently has no
   `scripts/phases/__init__.py`, so there is no duplicated `try_parse_json` /
   `extract_frontmatter` / `_parse_frontmatter` to remove here. This step is a

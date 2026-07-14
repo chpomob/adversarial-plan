@@ -1,1 +1,6 @@
 .adversarial-plan/
+__pycache__/
+
+.venv/
+.pytest_cache/
+*.py[cod]
