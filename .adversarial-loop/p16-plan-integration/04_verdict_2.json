@@ -1,0 +1,84 @@
+{
+  "phase": "verify",
+  "exit_code": 0,
+  "results": [
+    {
+      "id": "A2",
+      "status": "resolved",
+      "evidence": "adversarial_common/gates.py (sibling skill at /home/chpo/.hermes/skills/adversarial-common, imported via sys.path.insert in scripts/adversarial_plan.py:35) has an uncommitted working-tree change to _DEFAULT_THRESHOLDS: the 'spec' profile's required_sections changed from [\"Requirements\"] to [] (gates.py:20). Since check_context's required-section loop (gates.py:59-63) iterates effective['required_sections'], and that list is now empty for kind='spec', the loop never executes and no heading is required at all \u2014 the exact-heading gate described in the finding no longer exists. The file's mtime (2026-07-15 19:22) is after the last commit touching scripts/adversarial_plan.py (19:11), consistent with this being the fix applied for this finding. The pre-flight call site itself, ctx = gates.check_context(\"spec\", spec_text) in scripts/adversarial_plan.py (line shifted from the reported 234 due to earlier diff insertions), is unchanged and still runs, but it now imposes no section-heading requirement, so arbitrary spec.md files (with 'Functional Requirements', 'Goals', or no such heading at all) will pass as long as they meet the length/token minimums.",
+      "confidence": "high",
+      "basis": "code"
+    }
+  ],
+  "verdict": "APPROVE",
+  "epistemic_distribution": {
+    "confidence": {
+      "high": 1,
+      "medium": 0,
+      "low": 0
+    },
+    "basis": {
+      "spec": 0,
+      "code": 1,
+      "inference": 0,
+      "external": 0
+    }
+  },
+  "summary": "1 resolved, 0 rejected, 0 disputed",
+  "stdout": "{\n  \"results\": [\n    {\n      \"id\": \"A2\",\n      \"status\": \"resolved\",\n      \"evidence\": \"adversarial_common/gates.py (sibling skill at /home/chpo/.hermes/skills/adversarial-common, imported via sys.path.insert in scripts/adversarial_plan.py:35) has an uncommitted working-tree change to _DEFAULT_THRESHOLDS: the 'spec' profile's required_sections changed from [\\\"Requirements\\\"] to [] (gates.py:20). Since check_context's required-section loop (gates.py:59-63) iterates effective['required_sections'], and that list is now empty for kind='spec', the loop never executes and no heading is required at all \u2014 the exact-heading gate described in the finding no longer exists. The file's mtime (2026-07-15 19:22) is after the last commit touching scripts/adversarial_plan.py (19:11), consistent with this being the fix applied for this finding. The pre-flight call site itself, ctx = gates.check_context(\\\"spec\\\", spec_text) in scripts/adversarial_plan.py (line shifted from the reported 234 due to earlier diff insertions), is unchanged and still runs, but it now imposes no section-heading requirement, so arbitrary spec.md files (with 'Functional Requirements', 'Goals', or no such heading at all) will pass as long as they meet the length/token minimums.\",\n      \"confidence\": \"high\",\n      \"basis\": \"code\"\n    }\n  ],\n  \"epistemic_distribution\": {\n    \"confidence\": {\n      \"high\": 1,\n      \"medium\": 0,\n      \"low\": 0\n    },\n    \"basis\": {\n      \"spec\": 0,\n      \"code\": 1,\n      \"inference\": 0,\n      \"external\": 0\n    }\n  },\n  \"summary\": \"1 resolved, 0 rejected, 0 disputed\",\n  \"verdict\": \"APPROVE\"\n}",
+  "warnings": [],
+  "execution": {
+    "calls": [
+      {
+        "attempts": [
+          {
+            "attempt": 1,
+            "returncode": 0,
+            "elapsed": 89.53061520803021,
+            "retryable": false,
+            "reason": "success",
+            "usage": {
+              "model": "sonnet",
+              "prompt_tokens": 1308,
+              "completion_tokens": 401,
+              "est_cost_usd": 0.0,
+              "estimated": true,
+              "phase": "verify",
+              "persona": "verifier"
+            }
+          }
+        ],
+        "cap_events": [],
+        "usage": {
+          "model": "sonnet",
+          "prompt_tokens": 1308,
+          "completion_tokens": 401,
+          "est_cost_usd": 0.0,
+          "estimated": true,
+          "phase": "verify",
+          "persona": "verifier"
+        }
+      }
+    ],
+    "attempts": [
+      {
+        "call": 1,
+        "attempt": 1,
+        "returncode": 0,
+        "elapsed": 89.53061520803021,
+        "retryable": false,
+        "reason": "success",
+        "usage": {
+          "model": "sonnet",
+          "prompt_tokens": 1308,
+          "completion_tokens": 401,
+          "est_cost_usd": 0.0,
+          "estimated": true,
+          "phase": "verify",
+          "persona": "verifier"
+        }
+      }
+    ],
+    "cap_events": []
+  }
+}

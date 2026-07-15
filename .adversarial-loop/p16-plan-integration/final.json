@@ -1,4 +1,12 @@
 {
+  "verdict": "APPROVED",
+  "reason": "",
+  "loops": 2,
+  "branch": "loop/p16-plan-integration/3",
+  "merged": false,
+  "conditions": [],
+  "arbitrated": false,
+  "artifacts_dir": "/home/chpo/.hermes/skills/adversarial-plan/.adversarial-loop/p16-plan-integration",
   "context": {
     "ok": true,
     "reason": "ok",
@@ -14,22 +22,6 @@
     "min_tokens": 5,
     "required_sections": [],
     "min_source_lines": 0
-  },
-  "complexity": {
-    "score": 593,
-    "level": "trivial",
-    "recommended_agents": 1,
-    "stats": {
-      "chars": 553,
-      "files": 0,
-      "source_lines": 1,
-      "hunks": 0,
-      "requirements": 0,
-      "modules": 0
-    },
-    "tier": "trivial",
-    "max_agents": 1,
-    "summary": "trivial: 553 chars, 0 files, 1 source lines, 0 hunks, 0 requirements, 0 modules"
   },
   "execution": {
     "max_retries": 3,
@@ -146,6 +138,7 @@
       }
     }
   ],
+  "cap_events": [],
   "calls": [
     {
       "label": "build",
@@ -289,22 +282,6 @@
       "cap_events": []
     }
   ],
-  "warnings": [],
-  "cap_events": [],
-  "gates": [
-    {
-      "gate": "pre_build",
-      "command": "",
-      "ok": true,
-      "exit_code": 0,
-      "infra": false,
-      "log": "",
-      "truncated": false,
-      "project_markers": [
-        ".git"
-      ]
-    }
-  ],
   "costs": {
     "models": {
       "deepseek-v4-pro": {
@@ -440,21 +417,36 @@
       }
     ]
   },
-  "completed": [
-    "git_setup",
-    "pre_build_gate",
-    "build",
-    "review",
-    "fix_1",
-    "verify_1",
-    "fix_2",
-    "verify_2"
+  "gates": [
+    {
+      "gate": "pre_build",
+      "command": "",
+      "ok": true,
+      "exit_code": 0,
+      "infra": false,
+      "log": "",
+      "truncated": false,
+      "project_markers": [
+        ".git"
+      ]
+    }
   ],
-  "parent_branch": "main",
-  "branch": "loop/p16-plan-integration/3",
-  "branch_point": "88496d21fd8648297152a1d3b9bfa2dec59d7d4b",
-  "stash_id": "4d74604719d85061d4c636b06815033e5f562f18",
-  "loop": 2,
+  "complexity": {
+    "score": 593,
+    "level": "trivial",
+    "recommended_agents": 1,
+    "stats": {
+      "chars": 553,
+      "files": 0,
+      "source_lines": 1,
+      "hunks": 0,
+      "requirements": 0,
+      "modules": 0
+    },
+    "tier": "trivial",
+    "max_agents": 1,
+    "summary": "trivial: 553 chars, 0 files, 1 source lines, 0 hunks, 0 requirements, 0 modules"
+  },
   "findings": [
     {
       "id": "A2",
@@ -467,6 +459,38 @@
       "basis": "code"
     }
   ],
-  "phase": "verify_2",
-  "error": "git finalize: cannot squash merge loop/p16-plan-integration/3 -> main: working tree has tracked or staged changes"
+  "epistemic_labels": {
+    "confidence": {
+      "high": 1,
+      "medium": 0,
+      "low": 0
+    },
+    "basis": {
+      "spec": 0,
+      "code": 1,
+      "inference": 0,
+      "external": 0
+    },
+    "combined": {
+      "high/code": 1
+    }
+  },
+  "epistemic_distribution": {
+    "confidence": {
+      "high": 1,
+      "medium": 0,
+      "low": 0
+    },
+    "basis": {
+      "spec": 0,
+      "code": 1,
+      "inference": 0,
+      "external": 0
+    },
+    "combined": {
+      "high/code": 1
+    }
+  },
+  "warnings": [],
+  "error": "git finalize failed: cannot squash merge loop/p16-plan-integration/3 -> main: working tree has tracked or staged changes"
 }
