@@ -71,14 +71,18 @@ def run_role(cmd, prompt, role, timeout, cwd, *,
     :func:`runner.run_cli` (ledger, caps, retries, show_costs).
     """
     cmd = enhance_cmd_for_project(cmd, cwd)
+    extra = {}
+    if max_input_chars is not None:
+        extra['max_input_chars'] = max_input_chars
+    if max_output_chars is not None:
+        extra['max_output_chars'] = max_output_chars
     return runner.run_cli(
         cmd, stdin_text=prompt, timeout=timeout, cwd=cwd,
         persona_file=resolve_persona(role, cmd),
         ledger=ledger, show_costs=show_costs,
         max_retries=max_retries,
-        max_input_chars=max_input_chars,
-        max_output_chars=max_output_chars,
         phase=role, persona=role,
+        **extra,
     )
 
 
