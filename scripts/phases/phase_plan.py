@@ -155,7 +155,9 @@ def _build_prompt(spec_text, findings):
     return "".join(parts)
 
 
-def run_plan(spec_text, findings, dev_cmd, workdir, timeout, feature, run=None):
+def run_plan(spec_text, findings, dev_cmd, workdir, timeout, feature, run=None, *,
+             ledger=None, show_costs=False, max_retries=3,
+             max_input_chars=None, max_output_chars=None):
     """
     Run the plan-writer with the spec (+ optional findings) as input,
     validate ``plan.md``, commit.
@@ -167,7 +169,11 @@ def run_plan(spec_text, findings, dev_cmd, workdir, timeout, feature, run=None):
     run = run or run_role
     try:
         prompt = _build_prompt(spec_text, findings)
-        stdout, stderr, code = run(dev_cmd, prompt, "plan-writer", timeout, workdir)
+        stdout, stderr, code = run(dev_cmd, prompt, "plan-writer", timeout, workdir,
+                                   ledger=ledger, show_costs=show_costs,
+                                   max_retries=max_retries,
+                                   max_input_chars=max_input_chars,
+                                   max_output_chars=max_output_chars)
         if code != 0:
             return {
                 "phase": "plan",

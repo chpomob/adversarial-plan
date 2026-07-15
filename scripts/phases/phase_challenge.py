@@ -65,7 +65,9 @@ def _build_prompt(plan_text, spec_text, branch_point=""):
     )
 
 
-def run_challenge(review_cmd, workdir, timeout, run=None, branch_point=""):
+def run_challenge(review_cmd, workdir, timeout, run=None, branch_point="", *,
+                 ledger=None, show_costs=False, max_retries=3,
+                 max_input_chars=None, max_output_chars=None):
     """
     Run the plan-challenger against ``<workdir>/plan.md``.
 
@@ -89,7 +91,11 @@ def run_challenge(review_cmd, workdir, timeout, run=None, branch_point=""):
 
     def _attempt(prompt_text):
         stdout, stderr, code = run(
-            review_cmd, prompt_text, "plan-challenger", timeout, workdir)
+            review_cmd, prompt_text, "plan-challenger", timeout, workdir,
+            ledger=ledger, show_costs=show_costs,
+            max_retries=max_retries,
+            max_input_chars=max_input_chars,
+            max_output_chars=max_output_chars)
         if code != 0:
             return None, f"CHALLENGE exited {code}: {(stderr or '')[:200]}", stdout
         return try_parse_json(stdout), None, stdout

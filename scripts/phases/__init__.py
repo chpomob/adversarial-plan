@@ -59,16 +59,26 @@ def resolve_persona(role, cmd):
     return None
 
 
-def run_role(cmd, prompt, role, timeout, cwd):
+def run_role(cmd, prompt, role, timeout, cwd, *,
+             ledger=None, show_costs=False, max_retries=3,
+             max_input_chars=None, max_output_chars=None):
     """Run a role command with its persona injected.
 
     Returns ``(stdout, stderr, returncode)`` from the hardened
     ``runner.run_cli`` (temp-file IO, process-group kill on timeout).
+
+    Accepts optional reliability/cost keyword args forwarded to
+    :func:`runner.run_cli` (ledger, caps, retries, show_costs).
     """
     cmd = enhance_cmd_for_project(cmd, cwd)
     return runner.run_cli(
         cmd, stdin_text=prompt, timeout=timeout, cwd=cwd,
         persona_file=resolve_persona(role, cmd),
+        ledger=ledger, show_costs=show_costs,
+        max_retries=max_retries,
+        max_input_chars=max_input_chars,
+        max_output_chars=max_output_chars,
+        phase=role, persona=role,
     )
 
 

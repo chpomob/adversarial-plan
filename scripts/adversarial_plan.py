@@ -35,7 +35,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_SCRIPTS_DIR.parent))
 sys.path.insert(0, str(_SCRIPTS_DIR.parent.parent / "adversarial-common"))
 
-from adversarial_common import gitops, jsonio
+from adversarial_common import costs, gates, gitops, jsonio
 from adversarial_common.providers import resolve_role_cmd
 from scripts.phases import (extract_frontmatter, phase_challenge, phase_plan,
                             phase_revise, phase_verify)
@@ -189,7 +189,8 @@ def _final_md(verdict, feature, loops, reason):
     return "\n".join(lines) + "\n"
 
 
-def _finish(args, workdir, feature, out_dir, state, verdict, reason="", loops=0):
+def _finish(args, workdir, feature, out_dir, state, verdict, reason="", loops=0,
+            costs=None, complexity=None):
     """Squash-merge (APPROVED) or [REJECTED] marker, write final artifacts."""
     jsonio.save_artifact(out_dir, "final.md",
                          _final_md(verdict, feature, loops, reason))
@@ -207,14 +208,17 @@ def _finish(args, workdir, feature, out_dir, state, verdict, reason="", loops=0)
     except gitops.GitError as exc:
         error = f"git finalize failed: {exc}"
         print(f"X git finalize failed ({verdict}): {exc}")
-    jsonio.write_final_json(
-        out_dir, verdict,
+    final_kwargs = dict(
         reason=reason, loops=loops,
         branch=state.get("branch", ""),
         merged=merged,
         error=error,
         artifacts_dir=str(out_dir),
+        complexity=complexity,
     )
+    if costs is not None:
+        final_kwargs["costs"] = costs
+    jsonio.write_final_json(out_dir, verdict, **final_kwargs)
     print(f"\n{verdict}" + (f" — {reason}" if reason else ""))
     if error:
         return EXIT_INFRA
@@ -226,6 +230,16 @@ def _finish(args, workdir, feature, out_dir, state, verdict, reason="", loops=0)
 def _pipeline(args, dev_cmd, review_cmd, workdir, feature, out_dir,
               spec_text, findings, findings_text, state):
     """Run the full workflow. Returns the process exit code."""
+    # --- pre-flight: context check (R3) ---
+    ctx = gates.check_context("spec", spec_text)
+    if not ctx["ok"]:
+        print(f"X Spec context check failed: {ctx['reason']}")
+        return EXIT_USAGE
+
+    # --- cost ledger + complexity (R4) ---
+    ledger = costs.CostLedger()
+    complexity = gates.estimate_complexity(spec_text)
+
     # PHASE 0 — GIT SETUP
     setup = _setup_git(workdir, feature, state)
     state.update(setup)
@@ -239,10 +253,20 @@ def _pipeline(args, dev_cmd, review_cmd, workdir, feature, out_dir,
         jsonio.save_artifact(out_dir, "00_findings.json", findings_text)
     _stage_inputs(workdir, spec_text, findings_text)
 
+    # --- tag user-provided findings (R8) ---
+    if findings is not None:
+        for finding in findings:
+            if isinstance(finding, dict):
+                finding.setdefault("origin", "user")
+
     # PHASE 1 — PLAN
     _banner("PLAN  (PLAN-WRITER)")
     plan = phase_plan.run_plan(spec_text, findings, dev_cmd, workdir,
-                               args.timeout, feature)
+                               args.timeout, feature,
+                               ledger=ledger, show_costs=args.show_costs,
+                               max_retries=args.retries,
+                               max_input_chars=args.max_input_chars,
+                               max_output_chars=args.max_output_chars)
     _write_json(out_dir, "01_plan.json", plan)
     if plan["exit_code"] != 0:
         if plan.get("exit_code") == EXIT_USAGE:
@@ -255,10 +279,16 @@ def _pipeline(args, dev_cmd, review_cmd, workdir, feature, out_dir,
     _banner("CHALLENGE  (PLAN-CHALLENGER)")
     challenge = phase_challenge.run_challenge(
         review_cmd, workdir, args.timeout,
-        branch_point=state["branch_point"])
+        branch_point=state["branch_point"],
+        ledger=ledger, show_costs=args.show_costs,
+        max_retries=args.retries,
+        max_input_chars=args.max_input_chars,
+        max_output_chars=args.max_output_chars)
     _write_json(out_dir, "02_challenge.json", challenge)
     if challenge["exit_code"] != 0:
         return _phase_failed("challenge", challenge, state, out_dir)
+    # R5: normalize epistemic labels on challenge findings
+    jsonio.normalize_findings(challenge)
     challenge_findings = _ensure_ids(challenge.get("findings", []))
     verdict = challenge.get("verdict", "APPROVE")
     print(f"  OK {len(challenge_findings)} findings — verdict {verdict}")
@@ -274,7 +304,11 @@ def _pipeline(args, dev_cmd, review_cmd, workdir, feature, out_dir,
 
         _banner(f"REVISE  (round {n}/{args.max_loops})")
         revise = phase_revise.run_revise(challenge_findings, dev_cmd, workdir,
-                                         args.timeout, feature, n)
+                                         args.timeout, feature, n,
+                                         ledger=ledger, show_costs=args.show_costs,
+                                         max_retries=args.retries,
+                                         max_input_chars=args.max_input_chars,
+                                         max_output_chars=args.max_output_chars)
         _write_json(out_dir, f"03_revise_{n}.json", revise)
         if revise["exit_code"] != 0:
             return _phase_failed(f"revise_{n}", revise, state, out_dir)
@@ -282,10 +316,16 @@ def _pipeline(args, dev_cmd, review_cmd, workdir, feature, out_dir,
         _banner(f"VERIFY  (round {n}/{args.max_loops})")
         verify = phase_verify.run_verify(
             challenge_findings, review_cmd, workdir, args.timeout,
-            branch_point=state["branch_point"])
+            branch_point=state["branch_point"],
+            ledger=ledger, show_costs=args.show_costs,
+            max_retries=args.retries,
+            max_input_chars=args.max_input_chars,
+            max_output_chars=args.max_output_chars)
         _write_json(out_dir, f"04_verify_{n}.json", verify)
         if verify["exit_code"] != 0:
             return _phase_failed(f"verify_{n}", verify, state, out_dir)
+        # R5: normalize epistemic labels on verify results
+        jsonio.normalize_findings({"findings": verify.get("results", [])})
 
         results = verify.get("results", [])
         remaining = _unresolved(challenge_findings, results)
@@ -301,12 +341,16 @@ def _pipeline(args, dev_cmd, review_cmd, workdir, feature, out_dir,
         if remaining:
             challenge_findings = remaining
 
+    # R4: record costs + complexity in final.json
+    cost_summary = ledger.summary()
     if approved:
         return _finish(args, workdir, feature, out_dir, state, "APPROVED",
-                       loops=loops_run)
+                       loops=loops_run,
+                       costs=cost_summary, complexity=complexity)
     return _finish(args, workdir, feature, out_dir, state, "REJECT",
                    reason=f"findings unresolved after {args.max_loops} loops",
-                   loops=loops_run)
+                   loops=loops_run,
+                   costs=cost_summary, complexity=complexity)
 
 
 # --- CLI --------------------------------------------------------------------------
@@ -345,6 +389,14 @@ def build_parser():
     p.add_argument("--out", default=".adversarial-plan", help="Artifacts directory")
     p.add_argument("--no-merge", action="store_true",
                    help="On approval, leave the plan branch unmerged")
+    p.add_argument("--show-costs", action="store_true",
+                   help="Print per-phase cost breakdown to stderr")
+    p.add_argument("--retries", type=_positive_int, default=3,
+                   help="Max CLI retries per phase call (default: 3)")
+    p.add_argument("--max-input-chars", type=_positive_int, default=None,
+                   help="Cap prompt input chars per phase call")
+    p.add_argument("--max-output-chars", type=_positive_int, default=None,
+                   help="Cap provider output chars per phase call")
     return p
 
 

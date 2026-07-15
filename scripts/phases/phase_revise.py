@@ -19,7 +19,9 @@ from . import run_role, validate_plan_file
 __all__ = ["run_revise"]
 
 
-def run_revise(findings, dev_cmd, workdir, timeout, feature, round_n, run=None):
+def run_revise(findings, dev_cmd, workdir, timeout, feature, round_n, run=None, *,
+              ledger=None, show_costs=False, max_retries=3,
+              max_input_chars=None, max_output_chars=None):
     """
     Run the plan-writer in FIX mode against the challenger's findings.
 
@@ -38,7 +40,11 @@ def run_revise(findings, dev_cmd, workdir, timeout, feature, round_n, run=None):
             "Do not print the plan body to stdout.\n\n"
             f"Findings:\n{json.dumps(findings, indent=2)}"
         )
-        stdout, stderr, code = run(dev_cmd, prompt, "plan-writer", timeout, workdir)
+        stdout, stderr, code = run(dev_cmd, prompt, "plan-writer", timeout, workdir,
+                                   ledger=ledger, show_costs=show_costs,
+                                   max_retries=max_retries,
+                                   max_input_chars=max_input_chars,
+                                   max_output_chars=max_output_chars)
         if code != 0:
             return {
                 "phase": "revise",

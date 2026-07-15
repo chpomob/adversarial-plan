@@ -10,8 +10,8 @@ from scripts.phases import phase_challenge, phase_plan, phase_revise, phase_veri
 
 
 def fake_run(stdout="", stderr="", code=0, side_effect=None, calls=None):
-    """Build an injectable `run(cmd, prompt, role, timeout, cwd)` stub."""
-    def _run(cmd, prompt, role, timeout, cwd):
+    """Build an injectable `run(cmd, prompt, role, timeout, cwd, ...)` stub."""
+    def _run(cmd, prompt, role, timeout, cwd, **kwargs):
         if calls is not None:
             calls.append({"cmd": cmd, "prompt": prompt, "role": role,
                           "timeout": timeout, "cwd": cwd})
