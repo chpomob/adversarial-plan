@@ -7,3 +7,4 @@ __pycache__/
 .adversarial-loop/
 _retrospective/
 references/
+step-P*-spec.md

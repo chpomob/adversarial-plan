@@ -35,16 +35,13 @@ MERGE  ──→ squash-merge (APPROVED) or [REJECTED] commit
 python3 scripts/adversarial_plan.py \
   --spec <file>              # spec.md to plan (default: <workdir>/spec.md)
   --findings <file>          # optional findings.json from a review
-  --dev-cmd <cmd>            # plan-writer (default from provider config or env)
-  --review-cmd <cmd>         # plan-challenger (default from provider config or env)
+  --dev-cmd <cmd>            # plan-writer (default: pi ... glm-5.2)
+  --review-cmd <cmd>         # plan-challenger (default: pi ... deepseek)
   --workdir <dir>            # default: .
   --max-loops <N>            # default: 2
   --feature <name>           # default: from spec filename
   --timeout <N>              # default: 600
   --out <dir>                # default: .adversarial-plan
-  --provider-config <path>   # external provider config
-  --force                    # bypass all quota checks
-  --force-provider ROLE:ALIAS # force a specific alias for a single role
   --no-merge
 ```
 
@@ -95,21 +92,25 @@ Loaded from adversarial-common/personas/:
 
 ## Integration with dev loop
 
-Since `--plan` mode is not wired in the code loop (see pitfall #1 in adversarial-code-loop),
-run each plan step as a separate code loop with `--spec` pointed at a focused spec for that step:
+**IMPORTANT: `--plan` mode is NOT wired in `adversarial-code-loop`** — pitfall #1.
+The `adversarial_loop.py` argparse accepts `--spec`, not `--plan`. Do NOT try
+`--plan /path/to/plan.md` (fails with "error: the following arguments are required: --spec").
+
+Instead, execute each plan step as a separate code loop with a focused per-step
+spec. See `references/run-plan-steps-without-plan-mode.md` for the workflow.
 
 ```bash
-cd ~/.hermes/skills/adversarial-code-loop && python3 scripts/adversarial_loop.py \
-  --spec /path/to/step-spec.md \
-  --workdir /path/to/repo \
-  --dev-cmd "<writer-command>" \
-  --review-cmd "<reviewer-command>"
+# Example: running P1 of a plan
+python3 ~/.hermes/skills/adversarial-code-loop/scripts/adversarial_loop.py \
+  --spec /path/to/step-P1-spec.md \
+  --workdir /path/to/target-repo \
+  --dev-cmd "codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --sandbox workspace-write" \
+  --review-cmd "python3 .../claude-tmux.py --timeout 900 --hard-timeout 1800 --cwd /path/to/target-repo" \
+  --timeout 1800 --max-loops 3 --no-arbiter
 ```
 
-Multi-repo plans: the dev loop's `_resolve_step_workdir()` attempts to detect
-the correct git repo for each step based on its file paths, but this feature is
-**experimental** and not fully validated. For now, keep all steps of a plan
-inside a single repo. See adversarial-code-loop pitfall #26.
+Steps without dependencies targeting different repos can run in parallel (safe).
+Parallel on the same repo is forbidden (adversarial-code-loop pitfall #8).
 
 ## Plan format constraints
 
@@ -138,4 +139,5 @@ inside a single repo. See adversarial-code-loop pitfall #26.
 - **CHALLENGE phase was embedding the full plan + spec text in the prompt (1000+ lines). Fixed 2026-07-14: reduced to 724 chars by removing the text embedding.** The `_build_prompt()` function in `phase_challenge.py` was concatenating `plan_text` and `spec_text` into the prompt — making the model read redundant text and causing extended-thinking timeouts on large documents. **Fix:** patch `_build_prompt()` to only reference file paths (`plan.md` and `spec.md` are in the current directory) and remove the `--- plan.md ---\n{plan_text}\n--- spec.md ---\n{spec_text}` suffix. The model reads files from disk via `--cwd`. This reduces total prompt size from ~1000+ lines to ~724 chars and eliminates extended-thinking timeouts. **Validated 2026-07-15:** plan challenge completed in ~2 min with Claude Sonnet (vs. 20+ min timeout before the fix).
 - **Claude Fable 5 (2026-07) succeeded as plan-challenger** — a real run produced 4 findings, REQUEST_CHANGES → REVISE → APPROVE with 4/4 settled. If Claude exits code 3 (non-parseable output), fall back to DeepSeek (`pi --provider deepseek --model deepseek-v4-pro`).
 - **Validated end-to-end pairing (2026-07): Codex DEV + Claude Fable 5 REVIEW across ALL stages** — spec (11 findings), plan (4 findings), and code loop. All three stages completed in 1 cycle each. Fable 5 succeeded at both the embedded-prompt JSON pattern (spec/plan challenger) and the files-on-disk pattern (code loop reviewer). Fallback: Codex DEV + DeepSeek REVIEW for spec/plan when Claude quota is exhausted.
-- **Step spec files (step-P*.md) lost by git stash in code loops.** When running plan steps as individual code loops (the current workaround since `--plan` is not wired), each code loop's PHASE 0 runs `git stash push -u` which captures untracked files — including the `step-P*.md` spec files you created for subsequent steps. After the loop's squash-merge and stash pop, these files may vanish or conflict. **Fix:** before launching a multi-step series, add `step-*.md` to the adversarial-plan repo's `.gitignore` so the stash leaves them alone. Alternatively, re-create the next step's spec file from the plan after each completed step.
+- **`write_final_json()` may crash with TypeError for 'verdict'** at pipeline end. When the stash pop fails (see next pitfall), the error handling puts the payload dict in an unexpected state: `verdict` is passed both as a keyword argument and inside `**final_payload`. **Symptom:** the log shows "APPROVED" but exit code is 1 with `TypeError: write_final_json() got multiple values for argument 'verdict'`. The squash-merge ALREADY happened before `_finish()`, so the approved plan IS merged — only the final artifact write is lost. **Fix:** check stash state before `_finish()` and skip the pop when conflicts are detected.
+- **Untracked `--findings` file in the workdir causes stash pop conflict.** PHASE 0 stashes the entire workdir including `findings.json`. At pipeline end, `git stash pop` fails because `findings.json` already exists as an untracked file (the pipeline created it). **Symptom:** `git stash pop <sha> failed (possible conflict): findings.json already exists, no checkout`. **Fix:** `git add` the findings file before launching the pipeline, or pass `--findings` from a path outside the workdir (e.g., `/tmp/findings.json`). After the crash: `git stash drop` and `git add findings.json` to clean up.
