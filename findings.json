@@ -1,0 +1,42 @@
+{
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "major",
+      "step": "P6",
+      "summary": "Plan-mode nested-pipeline cache/resolver reuse is flagged as a risk but assigned to no step's Files/Description",
+      "evidence": "P6 Risks states 'plan-mode nested pipelines must reuse the same resolver/cache instead of constructing one per step,' yet P6 Files omits phase_plan.py, and the only step touching phase_plan.py (P7) describes merely 'merge step-level histories in step order,' not resolver/cache construction or sharing across nested invocations.",
+      "confidence": "medium",
+      "basis": "code"
+    },
+    {
+      "id": "F2",
+      "severity": "major",
+      "step": "P7",
+      "summary": "P7 should own resolver/cache lifecycle for plan mode, not leave it as an orphan risk",
+      "evidence": "P7 is described as 'Aggregate code-loop decisions into step and pipeline reports' but the risk of nested-pipeline resolver reuse sits in P6 without a code owner.",
+      "confidence": "medium",
+      "basis": "code"
+    },
+    {
+      "id": "F3",
+      "severity": "minor",
+      "step": "P4",
+      "summary": "P4's Tests field never verifies AC2's requirement that runner.py contains no model name strings",
+      "evidence": "AC2 states 'No model name string appears in runner.py or quota.py source.' P3's Tests explicitly cover 'no model strings in quota.py,' but P4's Tests list contains no equivalent check for runner.py.",
+      "confidence": "high",
+      "basis": "spec"
+    },
+    {
+      "id": "F4",
+      "severity": "minor",
+      "step": "P3",
+      "summary": "Plan silently reinterprets AC3's literal DRAINING-provider scenario instead of flagging the spec contradiction",
+      "evidence": "P3 Risks: 'the literal second half of AC3 leaves a DRAINING provider runnable while expecting no provider, so the test fixture must also block that provider to honor the normative state machine' — this changes the AC3 test scenario as written (cmd2=DRAINING) without noting it as an open question needing spec confirmation.",
+      "confidence": "medium",
+      "basis": "spec"
+    }
+  ],
+  "verdict": "REQUEST_CHANGES",
+  "summary": "0 blockers, 2 majors, 2 minors"
+}

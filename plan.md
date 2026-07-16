@@ -1,6 +1,6 @@
 ---
-spec: "adversarial-skills-refacto-8-items"
-version: "1.1"
+spec: "quota-aware-provider-registry"
+version: "1.0"
 author: "adversarial-plan"
 based-on: "adversarial-spec"
 findings-input: true
@@ -8,167 +8,82 @@ findings-input: true
 
 # Implementation Plan
 
-Cross-skill refactoring across five repos under `~/.hermes/skills/`:
-`adversarial-common`, `adversarial-code-loop`, `adversarial-code-review`,
-`adversarial-spec`, `adversarial-plan`. Paths below are absolute so a dev loop
-can resolve them unambiguously regardless of CWD.
-
-Note on the spec: Items 5 and 6 reference
-`~/.hermes/skills/adversarial-plan/scripts/phases/__init__.py`, which does **not**
-exist in the adversarial-plan repo today (the repo currently tracks only
-`spec.md`). The dedup therefore lands for the code-loop and spec callers; the
-plan repo is covered by a guard step (P9) so that if/when it gains that module it
-imports the shared helpers instead of duplicating them.
-
 ## Steps
 
-### P1: Delete 4 unused persona files (Item 1)
-- **Files:** /home/chpo/.hermes/skills/adversarial-common/personas/architect.md, /home/chpo/.hermes/skills/adversarial-common/personas/inspector.md, /home/chpo/.hermes/skills/adversarial-common/personas/synthesis.md, /home/chpo/.hermes/skills/adversarial-common/personas/cross_review.md
-- **Description:** Remove the four dead persona files. adversarial_review.py uses architect, inspector, cross_review, and synthesis only as role names; no Python code references these file paths.
+### P1: Load and validate the external provider registry (R2, R3, R7, R9, R15)
+- **Files:** [/home/chpo/.hermes/skills/adversarial-common/adversarial_common/providers.py, /home/chpo/.hermes/skills/adversarial-common/adversarial_common/__init__.py, /home/chpo/.hermes/skills/adversarial-common/adversarial_common/tests/test_providers.py]
+- **Description:** Implement the R2/R3/R7/R9/R15 configuration layer with `ProviderConfig` and a registry object containing ordered role chains, `quota_cmd`, and `quota_cache_ttl`; load YAML with precedence `--provider-config` path, `ADVERSARIAL_PROVIDER_CONFIG`, then `~/.config/adversarial/providers.yaml`; apply `ADVERSARIAL_<ROLE>_PROVIDERS` inline-JSON overrides after YAML; validate aliases, commands, quota-check arguments, numeric thresholds, TTL, duplicate aliases within a role, and malformed/unknown top-level data using stable English exception codes/details for machine consumption, while leaving localization of CLI-facing validation text to the entry points; keep provider aliases, commands, and fallback chains entirely external and ship no provider config file or built-in registry defaults.
 - **Dependencies:** []
-- **Tests:** Assert persona_path("architect") raises FileNotFoundError, and grep all adversarial-skill Python files for references to the four deleted filenames.
-- **Risks:** None — the dedicated persona files are unused.
+- **Tests:** Extend `test_providers.py` for R2/R3/R7/R9/R15 and AC2/AC7: preserve YAML order; prove CLI-path > config-env > home-default precedence with temporary files; prove a valid `ADVERSARIAL_DEV_PROVIDERS` array replaces only the YAML `dev` chain while a generalized role override works for every supported role; reject malformed JSON/YAML, missing fields, invalid TTL/thresholds, and duplicate role aliases with stable English machine codes/details without asserting English CLI prose; load an arbitrary `my-model` alias and quota-check flag without code changes; scan every adversarial skill tree to assert no provider YAML/default chain is shipped.
+- **Risks:** Existing `providers.py` also owns transient retry detection and legacy command helpers, so registry additions must not change those APIs; environment overrides must be parsed as data rather than shell text, and `~` expansion must occur only for the selected config path.
 
-### P2: Add shared structured-text helpers to jsonio.py + require PyYAML (Item 5, Item 6, Item 8)
-- **Files:** `/home/chpo/.hermes/skills/adversarial-common/adversarial_common/jsonio.py`
-- **Description:** Add four new public/semi-public functions plus a module-level
-  regex, making PyYAML a hard dependency (it is already installed in this env):
-  - `_FRONTMATTER_RE = re.compile(r"\A---[ \t]*\n(.*?)\n---[ \t]*(?:\n|\Z)", re.DOTALL)`
-  - `extract_frontmatter(text) -> str | None` — return the raw YAML block, or None (strip a leading BOM before matching, same as the spec version).
-  - `parse_frontmatter(fm_text) -> (dict | None, error | None)` — always `yaml.safe_load`; drop the fragile `^([A-Za-z_][\w-]*)\s*:\s*(.*)$` regex fallback entirely. Import `yaml` at module top (no `try/except ImportError`). On `yaml.YAMLError` return `(None, "invalid YAML: ...")`; if the result is not a dict return `(None, "frontmatter is not a YAML mapping")`.
-  - `parse_json_output(text) -> dict | list | None` — 3-strategy extraction matching the spec/code-loop version: (1) strip ```` ``` ```` fences, (2) `json.loads` whole, (3) extract outermost `{..}` then `[..]`. Return None on failure or empty/non-str input.
-  Keep the existing `strip_json_wrapper` / `save_artifact` / `resume_artifact` / `write_final_json` untouched (callers depend on them).
+### P2: Extend the quota-check CLI for GLM and DeepSeek (R14)
+- **Files:** [/home/chpo/.hermes/skills/adversarial-code-review/scripts/check-ai-quota.py, /home/chpo/.hermes/skills/adversarial-code-review/tests/test_quota_cli.py]
+- **Description:** Implement R14 by importing the plugin's existing `fetch_glm_quota` and `fetch_deepseek_balance` adapters, adding `--glm`, `--deepseek`, and explicit `--all` selection, normalizing GLM percentage and DeepSeek balance responses into the same English-keyed `{"results": ..., "errors": ...}` JSON envelope, retaining provider-specific data needed by schema-based threshold evaluation, and performing enabled checks in one bounded parallel batch; JSON/machine errors remain English, while human CLI help, warnings, and validation rendering use the active conversation/session language per R12.
 - **Dependencies:** []
-- **Tests:** Add `/home/chpo/.hermes/skills/adversarial-common/adversarial_common/tests/test_jsonio_shared.py` with: (a) `parse_json_output('{"x":1}') == {'x':1}`; (b) `parse_json_output('```json\n[1,2]\n```') == [1,2]`; (c) `parse_frontmatter('name: x\nlist:\n  - a\n  - b')[0] == {'name':'x','list':['a','b']}` (proves the regex fallback removal — lists now parse); (d) `extract_frontmatter('---\nname: x\n---\nbody') == 'name: x'`; (e) `extract_frontmatter('no fm') is None`. Run with `python3 -m pytest` from the adversarial-common repo root.
-- **Risks:** Low. Making PyYAML hard-required is safe here (verified present). If a future stripped-down environment lacks PyYAML, add it to requirements rather than resurrecting the regex.
+- **Tests:** Add `test_quota_cli.py` for R12/R14 and AC10/AC12: monkeypatch all plugin fetchers; assert `--json --glm` and `--json --deepseek` produce structured English-keyed results and exit 0; assert missing GLM/DeepSeek credentials produce an English JSON error and exit 1, while the equivalent human-mode CLI error/help can be rendered in French under a French session-language fixture; assert `--all`/no-selector runs each enabled fetcher once in parallel and mixed success still preserves successful snapshots plus errors; retain Claude/Codex/Gemini flag behavior.
+- **Risks:** Plugin payloads can change independently, so the wrapper must retain raw fields while normalizing only stable keys; tests must stub network fetchers and credentials and must not call live quota APIs.
 
-### P3: Remove `fail_phase` alias and update all callers (Item 3)
-- **Files:** `/home/chpo/.hermes/skills/adversarial-common/adversarial_common/runner.py` (delete line 87 `fail_phase = _fail_phase`), `/home/chpo/.hermes/skills/adversarial-code-loop/scripts/adversarial_loop_v3.py` (line 21: change `from adversarial_common.runner import run_cli, fail_phase` → `from adversarial_common import runner` plus `from adversarial_common.runner import run_cli`; rename the 5 call sites `fail_phase(...)` → `runner._fail_phase(...)`), `/home/chpo/.hermes/skills/adversarial-code-review/scripts/adversarial_review.py` (line 271 `runner.fail_phase(...)` → `runner._fail_phase(...)`)
-- **Description:** Delete the public alias in `runner.py`. The function stays
-  private (`_fail_phase`). Update the two real callers so nothing imports the
-  removed `fail_phase` symbol. Both callers now use the fully-qualified
-  `runner._fail_phase(...)`: the v3 loop drops `fail_phase` from its
-  `from adversarial_common.runner import ...` line, adds
-  `from adversarial_common import runner`, and renames its 5 `fail_phase(...)`
-  call sites to `runner._fail_phase(...)` (`run_cli` call sites are untouched —
-  still imported directly); the review script changes `runner.fail_phase(...)` →
-  `runner._fail_phase(...)`. This choice satisfies spec Item 3's verification
-  grep `grep -r '[.]fail_phase\|import.*fail_phase'` (no hits): the import line
-  no longer names `fail_phase`, and `runner._fail_phase` has an underscore
-  between the dot and the name, so it does not match `[.]fail_phase`. (Earlier
-  draft proposed `import _fail_phase as fail_phase` — rejected because that line
-  matches `import.*fail_phase` and violates the spec criterion.)
-- **Dependencies:** []
-- **Tests:** `grep -rn '[.]fail_phase\|import.*fail_phase' /home/chpo/.hermes/skills/adversarial-*/ --include='*.py' | grep -v __pycache__` returns no hits (this is exactly spec Item 3's verification). `python3 -c "from adversarial_common.runner import _fail_phase; print(callable(_fail_phase))"` prints `True`; `python3 -c "from adversarial_common.runner import fail_phase"` raises ImportError. Smoke-import the v3 loop and review modules to confirm no NameError.
-- **Risks:** Low. Any caller not found by the grep would NameError at runtime; the grep above is the guard.
+### P3: Implement the model-agnostic quota resolver, state machine, thresholds, force modes, and global cache (R2, R3, R4, R5, R8, R13, R15, R16, R17; F4)
+- **Files:** [/home/chpo/.hermes/skills/adversarial-common/adversarial_common/quota.py, /home/chpo/.hermes/skills/adversarial-common/adversarial_common/__init__.py, /home/chpo/.hermes/skills/adversarial-common/adversarial_common/tests/test_quota.py]
+- **Description:** Implement R2/R3/R4/R5/R8/R13/R15/R16/R17 with a process-scoped `QuotaResolver`, alias-keyed TTL cache, immutable provider-decision records, and `NoProviderAvailable`; collect the configured entries' opaque `quota_check` arguments and invoke `quota_cmd` once per expired TTL window to populate every alias snapshot; interpret checker status plus schema shape (`balance` versus `session.used_pct`) without provider-name branches; choose ordered fallbacks, treat RATE-LIMITED/KEY_INVALID and threshold failures as unavailable, treat UNKNOWN as conservatively runnable with a warning, and retain OK/DRAINING as runnable per the normative state machine; record the raw snapshot, English machine reason, fallback flag, and all attempted snapshots; degrade to the primary command when the checker is missing/fails and emit a structured warning code whose user-facing text is rendered later in the conversation/session language; substitute `{workdir}` with a normalized absolute path whose trailing separators are stripped without corrupting the filesystem root; make `force` select the first entry and `force-provider` select the named role alias without a quota call. F4 is addressed explicitly: AC3's literal fixture expects cmd3 even though cmd2 is DRAINING, and later expects no provider while cmd2 remains DRAINING, which contradicts the stated runnable-DRAINING state machine; implementation and executable tests will follow the normative state machine, add a regression exposing the literal contradiction, and require specification confirmation before changing DRAINING semantics or claiming the literal AC3 fixture passes.
+- **Dependencies:** [P1]
+- **Tests:** Add `test_quota.py` for R2/R3/R4/R5/R8/R12/R13/R15/R16/R17 and AC2/AC3/AC4/AC6/AC10/AC11/AC13/AC14/AC15: select arbitrary aliases; skip RATE-LIMITED/KEY_INVALID; select DRAINING under the normative state machine; use UNKNOWN with a language-neutral warning code plus English machine reason; raise `NoProviderAvailable` with all snapshots when every entry is actually blocked; verify the corrected no-provider fixture blocks cmd1, cmd2, and cmd3; add an explicit contract test documenting that literal AC3 selects cmd2 and therefore needs spec clarification; use a fake monotonic clock and subprocess to prove four phase resolutions in 30 seconds cause one batch and cache hits are alias-shared across roles, then expiry causes exactly one new batch; cover missing/nonzero/invalid checker output; cover percentage and balance thresholds at, above, and below boundaries; cover `--force`/per-role force isolation and unknown forced aliases; cover absolute `{workdir}` substitution and root/trailing-slash handling.
+- **Risks:** AC3 cannot simultaneously pass literally and preserve the specification's explicit DRAINING-is-runnable rule, so that acceptance fixture is an open specification question rather than something to silently rewrite; cache locking must prevent concurrent phase calls from launching duplicate batches, cache entries must never be keyed by role, and raw checker output must be bounded before inclusion in errors/reports.
 
-### P4: Drop `dev_cmd` / `review_cmd` from `run_arbiter` signature (Item 2)
-- **Files:** `/home/chpo/.hermes/skills/adversarial-code-loop/scripts/phases/phase_arbiter.py` (function `run_arbiter`, currently at line 55), `/home/chpo/.hermes/skills/adversarial-code-loop/scripts/adversarial_loop.py` (call site at line 452), `/home/chpo/.hermes/skills/adversarial-code-loop/scripts/adversarial_loop_v4.py` (call site at line 437), `/home/chpo/.hermes/skills/adversarial-code-loop/scripts/phases/test_phases.py` (helper `_run_arbiter` at line 155)
-- **Description:** Change `run_arbiter(findings, dev_cmd, review_cmd, arbiter_cmd, providers)` to `run_arbiter(findings, arbiter_cmd, providers)`. Update the docstring signature line. Remove the two unused positional args from every caller. Both `adversarial_loop.py` and `adversarial_loop_v4.py` currently pass the loop's dev/review commands positionally — drop those two args, keeping `arbiter_cmd` and `providers`. Update the test helper to call the new 3-arg form.
-- **Dependencies:** []
-- **Tests:** `python3 -c "import sys; sys.path.insert(0,'/home/chpo/.hermes/skills/adversarial-code-loop/scripts'); from phases.phase_arbiter import run_arbiter; import inspect; p=inspect.signature(run_arbiter).parameters; assert set(p)=={'findings','arbiter_cmd','providers'}, p; print('ok')"`. Run `python3 -m pytest phases/test_phases.py -k arbiter` from the code-loop scripts dir.
-- **Risks:** Low. A missed caller will TypeError on invocation (too many positional args) — the loop's arbiter path only fires after max-loops, so the test must exercise `_run_arbiter` to catch it before runtime.
-
-### P5: Consolidate branch extraction into `gitops.get_current_branch` (Item 4)
-- **Files:** `/home/chpo/.hermes/skills/adversarial-code-loop/scripts/phases/phase_review.py` (inline `subprocess.run(["git","symbolic-ref","--short","HEAD"], ...)` inside `_build_prompt`), `/home/chpo/.hermes/skills/adversarial-code-loop/scripts/phases/phase_verify.py` (inline `subprocess.run(["git","symbolic-ref","--short","HEAD"], ...)` near top of `run_verify`)
-- **Description:** Replace both inline `subprocess.run(...)` blocks with
-  `from adversarial_common import gitops` then `branch = gitops.get_current_branch(workdir)`,
-  wrapped in `try/except gitops.GitError: branch = "(unknown)"`. In
-  `phase_review.py` this passes `cwd=workdir` correctly (already did). In
-  `phase_verify.py` the current inline call passes **no cwd** (runs against the
-  process CWD) — consolidating fixes this latent bug by routing through the
-  `workdir` argument the verifier already receives via prompt context. Remove the
-  now-unused `import subprocess` from both modules.
-- **Dependencies:** []
-- **Tests:** Existing `phases/test_phases.py` review/verify tests still pass. Add `test_branch_delegation.py`: monkeypatch `gitops.get_current_branch` to (a) return `"stub-branch"` and (b) record its received argument, then assert `_build_prompt(diff, workdir)` contains `` `stub-branch` `` **and** that the recorded call received `workdir` (not `None` or the process CWD) — this is the observable check that the latent `phase_verify.py` no-`cwd` bug is fixed. Mirror the same assertion against `run_verify`'s branch lookup (route through the monkeypatched `get_current_branch(workdir)`). `python3 -c "from adversarial_common import gitops; print(gitops.get_current_branch('.'))"` returns a branch name.
-- **Risks:** Low. `gitops.get_current_branch` raises `GitError` on detached HEAD — same semantics as the inline `subprocess` failure path, now caught explicitly.
-
-### P6: Route code-loop `phase_verify._try_parse_json` through `jsonio.parse_json_output` (Item 5, code-loop caller)
-- **Files:** `/home/chpo/.hermes/skills/adversarial-code-loop/scripts/phases/phase_verify.py`
-- **Description:** Delete the local `_try_parse_json` function (and its dead
-  `import ast`), import `from adversarial_common import jsonio`, and replace the
-  one call site `payload = _try_parse_json(stdout)` with
-  `payload = jsonio.parse_json_output(stdout)`. Keep a thin local alias
-  `_try_parse_json = jsonio.parse_json_output` only if any other code in the
-  module references it (it does not — single call site), so drop the alias too.
-- **Dependencies:** [P2, P5]
-- **Tests:** `python3 -c "from adversarial_common.jsonio import parse_json_output; assert parse_json_output('{\"x\":1}') == {'x':1}"` (P2 already guarantees this). Re-run `phases/test_phases.py -k verify` to confirm the verify retry path still extracts JSON.
-- **Risks:** Low. The two implementations are equivalent (same 3 strategies); `parse_json_output` returns None on failure, matching the old `_try_parse_json` contract used by `_validate`.
-
-### P7: Route adversarial-spec `phases/__init__.py` through shared jsonio helpers (Items 5, 6 — spec caller)
-- **Files:** `/home/chpo/.hermes/skills/adversarial-spec/scripts/phases/__init__.py`
-- **Description:** Remove the local `try_parse_json`, `extract_frontmatter`,
-  `_parse_frontmatter`, and `_FRONTMATTER_RE` definitions. Add
-  `from adversarial_common import jsonio` (alongside the existing
-  `from adversarial_common import persona_path, runner` import block; the
-  sys.path fallback already covers it). Re-export for backward compatibility:
-  `try_parse_json = jsonio.parse_json_output`,
-  `extract_frontmatter = jsonio.extract_frontmatter`. Update
-  `validate_spec_file` to call `jsonio.parse_frontmatter(fm_text)` instead of the
-  local `_parse_frontmatter`. Keep the public `__all__` entries
-  (`try_parse_json`, `extract_frontmatter`, `validate_spec_file`) so external
-  importers are unaffected. Behavior change from Item 8 (required PyYAML): list
-  frontmatter values now parse correctly where the old regex fallback silently
-  mangled them.
-- **Dependencies:** [P2]
-- **Tests:** `python3 -c "import sys; sys.path.insert(0,'/home/chpo/.hermes/skills/adversarial-spec/scripts'); from phases import try_parse_json, extract_frontmatter, validate_spec_file; assert try_parse_json('{\"a\":1}')=={'a':1}; assert extract_frontmatter('---\nname: x\n---\n')=='name: x'"`. Run the spec skill's existing `phases` test suite. Construct a temp dir with a `spec.md` whose frontmatter contains a YAML list and assert `validate_spec_file` succeeds (would have passed before only by luck of the regex).
-- **Risks:** Low. If any other module in adversarial-spec imported the private `_parse_frontmatter` or `_FRONTMATTER_RE` directly, it breaks — guard with `grep -rn '_parse_frontmatter\|_FRONTMATTER_RE' /home/chpo/.hermes/skills/adversarial-spec/ --include='*.py'` before editing; expect only the one file.
-
-### P8: Restore `--a-cmd` / `--b-cmd` / `--synth-cmd` flags in adversarial_review.py (Item 7)
-- **Files:** `/home/chpo/.hermes/skills/adversarial-code-review/scripts/adversarial_review.py`
-- **Description:** In `parse_args` (line 423) add three optional flags, each
-  defaulting to `None`:
-  `p.add_argument("--a-cmd", default=None, help="Architect review command (default: --review-cmd)")`,
-  `p.add_argument("--b-cmd", default=None, help="Inspector/cross review command (default: --review-cmd)")`,
-  `p.add_argument("--synth-cmd", default=None, help="Synthesis command (default: --review-cmd)")`.
-  In `main()` after `args.review_cmd = providers.resolve_role_cmd("review", ...)`,
-  resolve each override through the same `providers.resolve_role_cmd` with its
-  own env var and the resolved `args.review_cmd` as default:
-  `args.a_cmd = providers.resolve_role_cmd("review", args.a_cmd, "ACR_A_CMD", default=args.review_cmd)`,
-  `args.b_cmd = providers.resolve_role_cmd("review", args.b_cmd, "ACR_B_CMD", default=args.review_cmd)`,
-  `args.synth_cmd = providers.resolve_role_cmd("review", args.synth_cmd, "ACR_SYNTH_CMD", default=args.review_cmd)`.
-  In `run_adversarial_review` route the commands per role: architect → `args.a_cmd`,
-  inspector → `args.b_cmd`, the two cross_review passes → `args.b_cmd`, synthesis →
-  `args.synth_cmd` (replace the five `args.review_cmd` literals at lines 307–325).
-  Command mapping rationale: a-cmd = Architect pass; b-cmd = Inspector + the two
-  cross-review passes that continue the inspector line (spec: "Inspector (two
-  independent review passes)"); synth-cmd = Synthesis.
+### P4: Integrate pre-flight selection into the canonical runner without breaking direct commands (R1, R2, R4, R8, R10, R11, R12, R13, R16, R17; F3)
+- **Files:** [/home/chpo/.hermes/skills/adversarial-common/adversarial_common/runner.py, /home/chpo/.hermes/skills/adversarial-common/adversarial_common/providers.py, /home/chpo/.hermes/skills/adversarial-common/adversarial_common/tests/test_runner.py, /home/chpo/.hermes/skills/adversarial-common/adversarial_common/tests/test_contract.py]
+- **Description:** Extend `runner.run_cli` and the canonical `providers.run_cmd` adapter for R1/R2/R4/R8/R10/R11/R12/R13/R16/R17 with optional run-scoped resolver, operational role, and unique phase-decision id; resolve before argv parsing/persona injection, reuse the same decision for schema-output retries within one phase id, attach the JSON-safe decision and language-neutral warning code to `RunResult.metadata`, preserve tuple compatibility/cost accounting/retry behavior, bypass resolution when an explicit legacy CLI command wins, and translate `NoProviderAvailable` into return code 3 with bounded English structured error data/per-provider snapshots and no subprocess launch. The runner does not hardcode CLI warning prose: entry points localize warnings and CLI error summaries to the conversation/session language, while final artifacts retain English messages and fields. Existing callers with no registry/resolver continue to execute their supplied command unchanged.
 - **Dependencies:** [P3]
-- **Tests:** `python3 /home/chpo/.hermes/skills/adversarial-code-review/scripts/adversarial_review.py --help` lists the three new flags. Unit test `test_review_flags.py`: build `args` via `parse_args(['--a-cmd','CMDA','--review-cmd','DEFR'])` and assert `main()`-equivalent resolution sets `a_cmd` to the CMDA-resolved value and `b_cmd`/`synth_cmd` to the `DEFR`-resolved value when not overridden. Monkeypatch `_run_role` to record the command per role and assert architect got CMDA while inspector/cross/synthesis got the default.
-- **Risks:** Low — purely additive. Backward compat preserved: unset flags fall through to `--review-cmd`. Confirm `providers.resolve_role_cmd` signature supports the `default=` kwarg (it is used this way for `review` already, so it does).
+- **Tests:** Extend `test_runner.py` and `test_contract.py` for R1/R2/R4/R8/R10/R11/R12/R13/R16/R17 and AC2/AC6/AC8/AC10/AC11/AC14/AC15: verify selection occurs before execution, `{workdir}` reaches the launched argv, repeated calls under one phase id reuse one decision/history entry, distinct phase ids resolve independently through the shared cache, explicit overrides and force modes behave as specified, no-provider returns 3 without `_execute_attempt`, checker failure preserves the legacy command/exit code, metadata is JSON-safe, all machine diagnostics/field names are English, and warning/error metadata is localizable rather than pre-rendered English CLI prose. Address F3 with a source-level assertion that no configured or example model-name string (including every model name named by the spec) appears in either `runner.py` or `quota.py`, while an arbitrary `my-model` config still executes.
+- **Risks:** Quota return code 3 must remain distinguishable from the runner's cost-budget code 3 via structured metadata so pipeline finalizers can classify it as REJECT rather than infrastructure or budget failure; persona/provider-specific legacy logic must run only after the selected command is known.
 
-### P9: Guard adversarial-plan against reintroducing the duplicated helpers (Items 5, 6 — plan caller)
-- **Files:** `/home/chpo/.hermes/skills/adversarial-plan/scripts/phases/__init__.py` (does not exist yet), `/home/chpo/.hermes/skills/adversarial-plan/.gitignore` (ensure the line `__pycache__/` is present — append it if the file lacks it; create the file if it does not yet exist)
-- **Description:** The adversarial-plan repo currently has no
-  `scripts/phases/__init__.py`, so there is no duplicated `try_parse_json` /
-  `extract_frontmatter` / `_parse_frontmatter` to remove here. This step is a
-  **guard**: assert the absence of those definitions today, and document the
-  contract that if/when adversarial-plan gains a `phases/__init__.py`, it must
-  import `parse_json_output`, `extract_frontmatter`, and `parse_frontmatter` from
-  `adversarial_common.jsonio` rather than redefining them. Add a one-line module
-  docstring contract in a new (empty-body) `scripts/phases/__init__.py` that
-  re-exports the shared helpers, so the plan skill imports them from one place.
-- **Dependencies:** [P2]
-- **Tests:** `grep -rn 'def try_parse_json\|def extract_frontmatter\|def _parse_frontmatter\|_FRONTMATTER_RE' /home/chpo/.hermes/skills/adversarial-plan/ --include='*.py'` returns no redefinitions (only an import/re-export, if any). `python3 -c "import sys; sys.path.insert(0,'/home/chpo/.hermes/skills/adversarial-plan/scripts'); import phases; from phases import try_parse_json, extract_frontmatter; assert try_parse_json('{\"x\":1}')=={'x':1}"` (passes through to jsonio).
-- **Risks:** Low. Creating a near-empty `__init__.py` only matters if the plan skill later gains real phase modules; the re-export keeps that future code honest.
+### P5: Add shared provider-history rendering and report support (R6, R11, R12)
+- **Files:** [/home/chpo/.hermes/skills/adversarial-common/adversarial_common/report.py, /home/chpo/.hermes/skills/adversarial-common/adversarial_common/tests/test_report.py]
+- **Description:** Implement the shared R6/R11/R12 presentation helpers that validate/copy provider-decision metadata into the stable `provider_history` schema (`phase`, `alias`, `quota_state`, `fallback`, `reason`, `quota_snapshot`), render a concise English Markdown history for final.md, and add an escaped Provider history section to the existing self-contained HTML report without exposing command secrets or unbounded raw output.
+- **Dependencies:** [P4]
+- **Tests:** Extend `test_report.py` for R6/R11/R12 and AC5/AC9/AC10: render selected alias, phase, state, fallback reason, and safe snapshot details from valid history; handle absent/malformed history; HTML-escape hostile snapshot values; omit/redact configured commands and credential-like fields; assert normalized JSON keys and fixed report labels are English.
+- **Risks:** Raw snapshots may contain unexpected or sensitive checker fields, so final JSON keeps only the bounded quota payload needed for audit and HTML/Markdown renderers must redact credential-shaped keys and never render commands.
+
+### P6: Thread one phase decision through code-loop phase adapters (R1, R4, R10, R11; F1)
+- **Files:** [/home/chpo/.hermes/skills/adversarial-code-loop/scripts/phases/phase_build.py, /home/chpo/.hermes/skills/adversarial-code-loop/scripts/phases/phase_fix.py, /home/chpo/.hermes/skills/adversarial-code-loop/scripts/phases/phase_review.py, /home/chpo/.hermes/skills/adversarial-code-loop/scripts/phases/phase_verify.py, /home/chpo/.hermes/skills/adversarial-code-loop/scripts/phases/phase_arbiter.py, /home/chpo/.hermes/skills/adversarial-code-loop/scripts/phases/runtime.py, /home/chpo/.hermes/skills/adversarial-code-loop/scripts/phases/test_phases.py]
+- **Description:** Update the R1/R4/R10/R11 code-loop adapters to pass operational role and unique phase ids (`build`, `review`, `fix_N`, `verify_N`, `arbiter`) through the existing execution mapping, preserve a single selection across invalid-JSON retries, surface quota decision metadata/language-neutral warning codes in each phase result, and propagate quota-unavailable code 3 without converting it to a generic phase exception. F1 is addressed by limiting this step to ordinary phase adapters: it neither creates resolver/cache instances nor owns nested plan execution; the run-wide nested-plan lifecycle is isolated in P10.
+- **Dependencies:** [P4]
+- **Tests:** Extend `phase/test_phases.py` for R1/R4/R10/R11 and AC1/AC3/AC8/AC9: mock one shared resolver, assert DEV/REVIEW/VERIFY/ARBITER calls use the intended operational roles and unique ids, assert parse retry does not duplicate provider history, assert explicit command metadata bypasses only its role, and assert a no-provider result preserves code 3 plus snapshots to the orchestrator boundary.
+- **Risks:** Phase names must be stable and unique per loop round or history will be duplicated/collapsed; plan-mode resolver/cache reuse is not left as an orphan risk and is implemented and tested separately in P10.
+
+### P7: Wire localized provider CLI configuration and one top-level resolver per pipeline (R1, R5, R7, R9, R10, R12, R16, R17)
+- **Files:** [/home/chpo/.hermes/skills/adversarial-code-loop/scripts/adversarial_loop_v4.py, /home/chpo/.hermes/skills/adversarial-code-loop/scripts/test_loop_fixes.py, /home/chpo/.hermes/skills/adversarial-spec/scripts/adversarial_spec.py, /home/chpo/.hermes/skills/adversarial-spec/scripts/phases/__init__.py, /home/chpo/.hermes/skills/adversarial-spec/tests/test_orchestrator.py, /home/chpo/.hermes/skills/adversarial-plan/scripts/adversarial_plan.py, /home/chpo/.hermes/skills/adversarial-plan/scripts/phases/__init__.py, /home/chpo/.hermes/skills/adversarial-plan/tests/test_orchestrator.py, /home/chpo/.hermes/skills/adversarial-code-review/scripts/adversarial_review.py, /home/chpo/.hermes/skills/adversarial-code-review/tests/test_review_flags.py]
+- **Description:** Implement the common R1/R5/R7/R9/R10/R12/R16/R17 top-level concern at every real entry point: add `--provider-config`, `--force`, and repeatable validated `--force-provider role:alias`; after context preflight, load external configuration once and construct exactly one `QuotaResolver`/cache per top-level process; map BUILD/FIX/writer work to dev, REVIEW/CHALLENGE to review/challenger as configured, VERIFY to verify, and ARBITER to arbiter while retaining the existing command flags as explicit group overrides that skip quota only for their affected role; remove shipped model-specific command defaults/fallback chains and fall back only to explicit flags, legacy command environment variables, or external registry entries. Keep structured error identifiers/data English, but route argparse validation, `--help`, checker-degradation warnings, and CLI summaries of no-provider failures through each entry point's existing conversation/session-language presentation boundary. This step stops at top-level construction and ordinary pipeline injection; nested plan-mode object sharing and history merging are isolated in P10.
+- **Dependencies:** [P1, P3, P4, P6]
+- **Tests:** Extend the listed entry-point/orchestrator tests for R1/R5/R7/R9/R10/R12/R16/R17 and AC4/AC7/AC8/AC10/AC14/AC15: assert all four parsers expose the three flags; assert malformed/unknown `--force-provider` values, `--help`, checker-degradation warnings, and CLI no-provider summaries use an injected French session-language renderer while structured metadata retains English codes/keys; verify the English/default renderer still produces useful CLI text without making English mandatory for user-facing output; verify explicit `--dev-cmd`, `--review-cmd`, and `--arbiter-cmd` bypass only their role while other roles still resolve; verify global force and per-role force behavior; verify config-path precedence and inline role overrides; assert each top-level pipeline constructs one resolver and injects that same object into its ordinary phase calls.
+- **Risks:** Removing hardcoded model command defaults is required by the external-only configuration rule but changes no-argument startup behavior to a clear, localized CLI configuration error backed by English structured data; each entry point must use the established language source rather than inferring locale independently, and P7 must expose the resolver to P10 without serializing it.
+
+### P8: Persist quota decisions and clean no-provider outcomes in top-level final artifacts (R4, R6, R11, R12)
+- **Files:** [/home/chpo/.hermes/skills/adversarial-code-loop/scripts/adversarial_loop_v4.py, /home/chpo/.hermes/skills/adversarial-code-loop/scripts/test_loop_fixes.py, /home/chpo/.hermes/skills/adversarial-spec/scripts/adversarial_spec.py, /home/chpo/.hermes/skills/adversarial-spec/tests/test_orchestrator.py, /home/chpo/.hermes/skills/adversarial-plan/scripts/adversarial_plan.py, /home/chpo/.hermes/skills/adversarial-plan/tests/test_orchestrator.py, /home/chpo/.hermes/skills/adversarial-code-review/scripts/adversarial_review.py, /home/chpo/.hermes/skills/adversarial-code-review/tests/test_optional_modes.py]
+- **Description:** Implement R4/R6/R11/R12 finalization in the top-level code-loop, spec, plan, and code-review paths: merge one normalized resolver decision per quota-checked phase into `provider_history`; include it on success, rejection, early phase failure, and resume-safe final writes; append the shared English Markdown provider table to final.md; preserve raw bounded snapshots and English fallback reasons; classify structured quota-unavailable results as clean REJECT/exit 3 with the English final-artifact message `no provider available` and all attempted snapshots instead of timeout/infrastructure, while explicit-command phases remain absent from the quota-checked history count. The corresponding stderr/terminal summary is rendered through P7's conversation/session-language boundary and is not required to repeat the English artifact message.
+- **Dependencies:** [P5, P7]
+- **Tests:** Extend finalizer tests for R4/R6/R11/R12 and AC1/AC3/AC5/AC9/AC10: a blocked-primary/fallback-success run shows the fallback alias in final.md and full history in final.json; a three-phase quota-aware run has exactly three non-empty `phase`/`alias`/`quota_state`/`fallback` entries; no-provider writes all snapshots, the English `no provider available` artifact message, and return code 3 while a French session receives a French CLI summary; checker degradation emits a French warning under that fixture but preserves legacy exit status; resume does not duplicate entries; all stable final error strings, JSON keys, and Markdown headings are English.
+- **Risks:** Several pipelines have multiple early final writers, so a shared history extraction path must be used everywhere; final.md must not be written before the latest provider decision is attached, and resumed runs need deterministic de-duplication by phase-decision id.
+
+### P9: Exercise the complete quota-aware flows and external-only contract (R1, R2, R4, R5, R6, R7, R8, R9, R10, R11, R12, R13, R14, R15, R16, R17)
+- **Files:** [/home/chpo/.hermes/skills/adversarial-code-loop/scripts/test_quota_integration.py, /home/chpo/.hermes/skills/adversarial-spec/tests/test_quota_integration.py, /home/chpo/.hermes/skills/adversarial-plan/tests/test_quota_integration.py, /home/chpo/.hermes/skills/adversarial-code-review/tests/test_quota_integration.py]
+- **Description:** Add hermetic cross-repository integration coverage for R1/R2/R4/R5/R6/R7/R8/R9/R10/R11/R12/R13/R14/R15/R16/R17 using temporary provider YAML and checker scripts, real non-nested pipeline entry points, and harmless echo/write commands; cover fallback, caching, missing checker, external overrides, explicit/manual force modes, workdir substitution, threshold schemas, localized CLI presentation, English final artifacts, and the quota wrapper without installing or contacting any real provider. Nested code-loop plan execution is deliberately excluded and covered as the single concern of P10.
+- **Dependencies:** [P2, P8]
+- **Tests:** Run the four new suites plus all existing tests in adversarial-common, adversarial-code-loop, adversarial-spec, adversarial-plan, and adversarial-code-review; directly cover AC1 through AC15 for non-nested flows except AC3's contradictory DRAINING assertions, for which assert the normative DRAINING behavior and keep the explicit spec-confirmation regression from P3; for AC10 run French-session `--help`, malformed-force-provider, missing-checker warning, and no-provider CLI cases while asserting final.json/final.md fields and error messages remain English; measure call counts rather than wall-clock milliseconds for AC4 while also asserting cached resolution avoids the fake checker's deliberate delay; scan skill directories for shipped provider config/default chains and scan `runner.py`/`quota.py` for all spec-named model strings.
+- **Risks:** End-to-end tests cross git-creating pipelines and must isolate HOME, environment, cwd, output paths, and repositories; timing assertions should use fake clocks/events and call counts so CI load cannot create flakes.
+
+### P10: Reuse the top-level resolver and merge histories in nested code-loop plan mode (R1, R5, R11; F1, F2)
+- **Files:** [/home/chpo/.hermes/skills/adversarial-code-loop/scripts/adversarial_loop_v4.py, /home/chpo/.hermes/skills/adversarial-code-loop/scripts/phases/phase_plan.py, /home/chpo/.hermes/skills/adversarial-code-loop/scripts/test_plan.py]
+- **Description:** Resolve F1/F2 as an isolated nested-plan-mode change: make `run_plan` and `execute_step` receive the `QuotaResolver` already created by P7, ensure shallow-copied step arguments retain that exact object, pass it into every nested `run_pipeline` invocation without constructing or closing a per-step resolver/cache, and merge each step's normalized provider decisions into the parent plan's English-keyed `provider_history` in deterministic step/phase order without duplication. Persist only serializable history and resolver configuration references in copied/resumed plan state, never the live resolver or cache object.
+- **Dependencies:** [P7, P8, P9]
+- **Tests:** Extend `test_plan.py` for R1/R5/R11 and AC4/AC9: run a multi-step plan with a counting fake checker/resolver; assert object identity is unchanged from the top-level invocation through `run_plan`, `execute_step`, and every nested `_pipeline`; assert only one quota batch occurs inside the TTL across all steps and roles; assert each nested quota-checked phase contributes exactly one decision; assert the top-level final history equals the ordered concatenation of child histories; assert resume restores serialized history without duplicating entries or attempting to deserialize a live resolver.
+- **Risks:** Shallow step-argument copies can accidentally drop or replace runtime-only attributes, while indiscriminate state serialization can capture a non-serializable resolver; nested pipelines must not own the lifetime of the parent resolver, and history de-duplication must use stable phase-decision ids that remain distinct across steps.
 
 ## Ordering rationale
-- **P1 (personas), P2 (jsonio helpers), P3 (alias), P4 (arbiter sig), P5 (branch)
-  have no inter-dependencies** — they touch disjoint files, so any order among
-  them is valid. **P8 (review flags) depends on P3**: both edit
-  `adversarial-code-review/scripts/adversarial_review.py` (P3 at line 271,
-  P8 at lines 307–325 and 423); the explicit dependency prevents two diffs from
-  colliding in the same file. Steps are sequenced P1→P9 to give the dev loop a
-  linear run.
-- **P2 before P6 and P7 and P9** because P6/P7/P9 import the shared
-  `parse_json_output` / `extract_frontmatter` / `parse_frontmatter` that P2 adds.
-  P2 also carries Item 8 (require PyYAML), so the frontmatter fix is in place
-  before any caller is rewired to use it.
-- **P6 depends on P5** (encoded in P6's Dependencies as `[P2, P5]`) because both
-  edit `phase_verify.py`; the explicit dependency keeps the branch-extraction and
-  JSON-parsing diffs in the same file from colliding.
-- **P9 last** as a verification/guard step that depends on P2 and confirms the
-  plan repo never reintroduces the duplication it was created to remove.
-- No step depends on a later step; no circular dependencies.
-- Spec coverage: Item 1 → P1; Item 2 → P4; Item 3 → P3; Item 4 → P5;
-  Item 5 → P2+P6+P7+P9; Item 6 → P2+P7+P9; Item 7 → P8; Item 8 → P2.
+
+P1 establishes the external data contract before P3 can resolve a role chain, while independent P2 updates the checker surface that configured quota-check arguments invoke. P3 then supplies the state machine, thresholds, force semantics, workdir expansion, and the single alias-keyed cache; P4 integrates that resolver into the canonical subprocess boundary and explicitly adds F3's runner source scan. P5 builds report rendering on the stable decision schema.
+
+P6 adapts ordinary code-loop phases after the runner contract exists. P7 owns only the shared top-level CLI, localization boundary, resolver construction, and ordinary phase injection across the four pipeline packages; it deliberately excludes structurally distinct recursive plan mode. P8 depends on that lifecycle and the P5 renderers so top-level success/failure finalizers persist history and clean exit-3 outcomes. P9 verifies the complete non-nested cross-repository behavior, including the R12 split between localized CLI output and English artifacts. P10 then uses the stable, integration-tested top-level lifecycle to implement and verify F1/F2's nested resolver identity and ordered child-history merge as its own small code-loop unit. No step depends on a later step and there are no cycles.
+
+Requirement coverage is: R1 in P4/P6/P7/P9/P10; R2 in P1/P3/P4/P9; R3 in P1/P3; R4 in P3/P4/P6/P8/P9; R5 in P3/P7/P9/P10; R6 in P5/P8/P9; R7 in P1/P7/P9; R8 in P3/P4/P9; R9 in P1/P7/P9; R10 in P4/P6/P7/P9; R11 in P3/P4/P5/P6/P8/P9/P10; R12 in P1/P2/P3/P4/P5/P7/P8/P9; R13 in P3/P4/P9; R14 in P2/P9; R15 in P1/P3/P9; R16 in P3/P4/P7/P9; and R17 in P3/P4/P7/P9. Earlier findings coverage is F1/F2 in P6/P7/P10, F3 in P4, and F4 in P3/P9. The current P7-size finding is addressed by separating universal entry-point wiring in P7 from nested plan-mode resolver/history logic in P10; the current R12 finding is addressed by P1/P2/P3/P4/P7/P8/P9 tests that require localized CLI help, validation, warnings, and terminal summaries while keeping machine errors and report fields English.
