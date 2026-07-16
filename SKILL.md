@@ -118,7 +118,7 @@ inside a single repo. See adversarial-code-loop pitfall #26.
 
 ## Pitfalls
 
-- **The `--findings` flag does NOT accept adversarial-review's `final.json` as-is.** That file contains finding *counts* (`{blocker: 1, major: 2}`), not finding objects. You must extract structured findings from the review synthesis report and craft a findings.json manually. See `references/pipeline-review-to-plan.md` for the exact procedure and expected format.
+- **The `--findings` flag does NOT accept adversarial-review's `final.json` as-is.** That file contains finding *counts* (`{blocker: 1, major: 2}`), not finding objects. You must extract structured findings from the review synthesis report and craft a findings.json manually.
 - Each step must have explicit dependencies (or empty list). Circular deps cause validation failure.
 - If review findings are provided via --findings, the plan must address each finding in at least one step.
 - Step order should respect dependencies (topological sort is automatic).

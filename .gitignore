@@ -5,3 +5,5 @@ __pycache__/
 .pytest_cache/
 *.py[cod]
 .adversarial-loop/
+_retrospective/
+references/
