@@ -8,18 +8,18 @@ staged on disk. This phase then validates the file (existence + YAML
 frontmatter with a ``spec`` key + contiguous, requirement-covering steps) and stages/commits
 everything as ``plan: <feature> — <summary>``.
 
-Assumption: the spec sketches ``run_plan(..., providers)``; following rule 1
-("same pattern as adversarial_spec.py") the provider machinery is reached
-through the shared :func:`run_role` helper instead, injectable as *run* for
-tests.
+Provider-aware execution is routed through the shared ``run_phase_cmd`` API;
+the legacy *run* injection remains available for tests and downstream callers.
 """
 import json
 import re
 from pathlib import Path
 
-from adversarial_common import gitops
+from adversarial_common import NoProviderAvailable, gitops, run_phase_cmd
 
-from . import run_role, validate_plan_file
+from . import (enhance_cmd_for_project, provider_history,
+               raise_no_provider_available, resolve_persona, runtime_metadata,
+               validate_plan_file)
 
 __all__ = ["run_plan", "validate_step_coverage"]
 
@@ -155,8 +155,9 @@ def _build_prompt(spec_text, findings):
     return "".join(parts)
 
 
-def run_plan(spec_text, findings, dev_cmd, workdir, timeout, feature, run=None, *,
-             ledger=None, show_costs=False, max_retries=3,
+def run_plan(spec_text, findings, dev_cmd, workdir, timeout, feature,
+             resolver=None, run=None, *, explicit_cmd=None, force=False,
+             force_provider=None, ledger=None, show_costs=False, max_retries=3,
              max_input_chars=None, max_output_chars=None):
     """
     Run the plan-writer with the spec (+ optional findings) as input,
@@ -164,22 +165,63 @@ def run_plan(spec_text, findings, dev_cmd, workdir, timeout, feature, run=None, 
 
     Returns ``{"phase": "plan", "exit_code": 0, "commit_sha": "..."}``;
     on infrastructure failure exit 1; invalid plan coverage returns exit 2.
-    *run* is injectable for tests and defaults to :func:`run_role`.
+    *run* retains the legacy injectable test interface; normal execution uses
+    :func:`run_phase_cmd` and the provider registry.
     """
-    run = run or run_role
+    if run is None and callable(resolver) and not hasattr(resolver, "resolve"):
+        run, resolver = resolver, None
     try:
         prompt = _build_prompt(spec_text, findings)
-        stdout, stderr, code = run(dev_cmd, prompt, "plan-writer", timeout, workdir,
-                                   ledger=ledger, show_costs=show_costs,
-                                   max_retries=max_retries,
-                                   max_input_chars=max_input_chars,
-                                   max_output_chars=max_output_chars)
+        if run is not None:
+            provider_result = run(
+                dev_cmd, prompt, "plan-writer", timeout, workdir,
+                ledger=ledger, show_costs=show_costs,
+                max_retries=max_retries,
+                max_input_chars=max_input_chars,
+                max_output_chars=max_output_chars,
+            )
+        else:
+            legacy_cmd = enhance_cmd_for_project(dev_cmd, workdir)
+            selected_explicit = (
+                enhance_cmd_for_project(explicit_cmd, workdir)
+                if explicit_cmd is not None else None
+            )
+            command_args = {}
+            if resolver is None and explicit_cmd is None:
+                command_args["cmd"] = legacy_cmd
+            persona_cmd = selected_explicit or (
+                legacy_cmd if resolver is None else ""
+            )
+            execution_args = {
+                "stdin_text": prompt,
+                "timeout": timeout,
+                "persona_file": resolve_persona("plan-writer", persona_cmd),
+                "persona": "plan-writer",
+                "ledger": ledger,
+                "show_costs": show_costs,
+                "max_retries": max_retries,
+            }
+            if max_input_chars is not None:
+                execution_args["max_input_chars"] = max_input_chars
+            if max_output_chars is not None:
+                execution_args["max_output_chars"] = max_output_chars
+            provider_result = run_phase_cmd(
+                phase_name="plan", role="writer", workdir=workdir,
+                resolver=resolver, explicit_cmd=selected_explicit, force=force,
+                force_provider=force_provider, **command_args, **execution_args,
+            )
+            raise_no_provider_available(provider_result, "writer", "plan")
+        stdout, stderr, code = provider_result[:3]
+        history = provider_history([provider_result])
+        runtime = runtime_metadata(provider_result)
         if code != 0:
             return {
                 "phase": "plan",
                 "exit_code": 1,
                 "error": f"PLAN exited {code}: {(stderr or '')[:200]}",
                 "stdout": stdout,
+                "execution": runtime,
+                "provider_history": history,
             }
         ok, err = validate_plan_file(workdir)
         if not ok:
@@ -188,6 +230,8 @@ def run_plan(spec_text, findings, dev_cmd, workdir, timeout, feature, run=None, 
                 "exit_code": 1,
                 "error": f"plan validation failed: {err}",
                 "stdout": stdout,
+                "execution": runtime,
+                "provider_history": history,
             }
         try:
             plan_text = (Path(workdir) / "plan.md").read_text(encoding="utf-8")
@@ -197,6 +241,8 @@ def run_plan(spec_text, findings, dev_cmd, workdir, timeout, feature, run=None, 
                 "exit_code": 2,
                 "error": f"plan coverage validation failed: plan.md unreadable: {exc}",
                 "stdout": stdout,
+                "execution": runtime,
+                "provider_history": history,
             }
         ok, err = validate_step_coverage(spec_text, plan_text)
         if not ok:
@@ -205,6 +251,8 @@ def run_plan(spec_text, findings, dev_cmd, workdir, timeout, feature, run=None, 
                 "exit_code": 2,
                 "error": f"plan coverage validation failed: {err}",
                 "stdout": stdout,
+                "execution": runtime,
+                "provider_history": history,
             }
         gitops.commit_all(workdir, f"plan: {feature} — {_short_summary(spec_text)}")
         return {
@@ -212,6 +260,10 @@ def run_plan(spec_text, findings, dev_cmd, workdir, timeout, feature, run=None, 
             "exit_code": 0,
             "commit_sha": gitops.head_sha(workdir),
             "stdout": stdout,
+            "execution": runtime,
+            "provider_history": history,
         }
-    except Exception as exc:  # defensive: never leak an exception to the loop
+    except NoProviderAvailable:
+        raise
+    except Exception as exc:
         return {"phase": "plan", "exit_code": 1, "error": str(exc)}

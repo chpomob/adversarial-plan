@@ -18,27 +18,68 @@ Helpers shared by more than one phase live here:
 import json
 import re
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 # The adversarial-common sibling skill must be importable. The orchestrator
 # inserts it on sys.path before importing us; the fallback below keeps the
 # package importable on its own (tests, REPL).
 try:
-    from adversarial_common import persona_path, runner
+    from adversarial_common import (
+        NoProviderAvailable,
+        collect_provider_history,
+        persona_path,
+        runner,
+    )
     from adversarial_common.providers import enhance_cmd_for_project, persona_for_role
 except ImportError:  # pragma: no cover - exercised only on bare imports
     _COMMON = Path(__file__).resolve().parents[3] / "adversarial-common"
     sys.path.insert(0, str(_COMMON))
-    from adversarial_common import persona_path, runner
+    from adversarial_common import (
+        NoProviderAvailable,
+        collect_provider_history,
+        persona_path,
+        runner,
+    )
     from adversarial_common.providers import enhance_cmd_for_project, persona_for_role
 
 __all__ = [
     "run_role",
     "resolve_persona",
+    "provider_history",
+    "raise_no_provider_available",
+    "runtime_metadata",
     "try_parse_json",
     "extract_frontmatter",
     "validate_plan_file",
 ]
+
+
+def runtime_metadata(result):
+    """Copy JSON-safe runner evidence without changing tuple compatibility."""
+    metadata = getattr(result, "metadata", {})
+    return dict(metadata) if isinstance(metadata, Mapping) else {}
+
+
+def provider_history(results):
+    """Collect provider decisions from phase calls in execution order."""
+    return collect_provider_history(results)
+
+
+def raise_no_provider_available(result, role, phase):
+    """Restore provider exhaustion represented by ``run_phase_cmd`` metadata."""
+    metadata = getattr(result, "metadata", None)
+    if not isinstance(metadata, Mapping):
+        return
+    snapshots = metadata.get("raw_snapshots")
+    reasons = metadata.get("rejection_reasons")
+    if not isinstance(snapshots, Mapping) or not isinstance(reasons, Mapping):
+        return
+    error = NoProviderAvailable(role, snapshots, reasons)
+    error.phase = phase
+    decision = metadata.get("provider_decision")
+    error.provider_decision = dict(decision) if isinstance(decision, Mapping) else None
+    raise error
 
 
 # --- persona-aware execution --------------------------------------------------

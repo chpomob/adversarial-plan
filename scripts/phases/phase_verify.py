@@ -7,15 +7,17 @@ APPROVE/REJECT verdict. JSON extraction uses the shared 3-strategy parser
 (:func:`try_parse_json`); one retry with a stricter instruction on invalid
 JSON.
 
-Assumption: the spec sketches ``run_verify(findings, dev_cmd, workdir,
-providers, jsonio)``; following rule 1 ("same pattern as
-adversarial_spec.py") the signature is ``(findings, review_cmd, workdir,
-timeout, run=None)`` — verification runs with the review command.
+Provider-aware execution is routed through the shared ``run_phase_cmd`` API;
+the legacy *run* injection remains available for tests and downstream callers.
 """
 import json
 from pathlib import Path
 
-from . import run_role, try_parse_json
+from adversarial_common import NoProviderAvailable, run_phase_cmd
+
+from . import (enhance_cmd_for_project, provider_history,
+               raise_no_provider_available, resolve_persona, runtime_metadata,
+               try_parse_json)
 
 __all__ = ["run_verify"]
 
@@ -39,8 +41,9 @@ def _validate(payload):
     return True
 
 
-def run_verify(findings, review_cmd, workdir, timeout, run=None, branch_point="", *,
-              ledger=None, show_costs=False, max_retries=3,
+def run_verify(findings, review_cmd, workdir, timeout, resolver=None, run=None,
+              branch_point="", *, explicit_cmd=None, force=False,
+              force_provider=None, ledger=None, show_costs=False, max_retries=3,
               max_input_chars=None, max_output_chars=None):
     """
     Run the plan-challenger in VERIFY mode against the revised plan.
@@ -49,7 +52,8 @@ def run_verify(findings, review_cmd, workdir, timeout, run=None, branch_point=""
     "verdict": "APPROVE|REJECT"}``; on failure ``{"phase": "verify",
     "exit_code": 1, "error": "..."}``. *run* is injectable for tests.
     """
-    run = run or run_role
+    if run is None and callable(resolver) and not hasattr(resolver, "resolve"):
+        run, resolver = resolver, None
     try:
         plan_text = (Path(workdir) / "plan.md").read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
@@ -72,22 +76,63 @@ def run_verify(findings, review_cmd, workdir, timeout, run=None, branch_point=""
         f"--- revised plan.md ---\n{plan_text}"
     )
 
+    provider_results = []
+    runtime_calls = []
+
     def _attempt(prompt_text):
-        stdout, stderr, code = run(
-            review_cmd, prompt_text, "plan-challenger", timeout, workdir,
-            ledger=ledger, show_costs=show_costs,
-            max_retries=max_retries,
-            max_input_chars=max_input_chars,
-            max_output_chars=max_output_chars)
+        if run is not None:
+            result = run(
+                review_cmd, prompt_text, "plan-challenger", timeout, workdir,
+                ledger=ledger, show_costs=show_costs,
+                max_retries=max_retries, max_input_chars=max_input_chars,
+                max_output_chars=max_output_chars,
+            )
+        else:
+            legacy_cmd = enhance_cmd_for_project(review_cmd, workdir)
+            selected_explicit = (
+                enhance_cmd_for_project(explicit_cmd, workdir)
+                if explicit_cmd is not None else None
+            )
+            command_args = {}
+            if resolver is None and explicit_cmd is None:
+                command_args["cmd"] = legacy_cmd
+            persona_cmd = selected_explicit or (
+                legacy_cmd if resolver is None else ""
+            )
+            execution_args = {
+                "stdin_text": prompt_text, "timeout": timeout,
+                "persona_file": resolve_persona("plan-challenger", persona_cmd),
+                "persona": "plan-challenger", "ledger": ledger,
+                "show_costs": show_costs, "max_retries": max_retries,
+            }
+            if max_input_chars is not None:
+                execution_args["max_input_chars"] = max_input_chars
+            if max_output_chars is not None:
+                execution_args["max_output_chars"] = max_output_chars
+            result = run_phase_cmd(
+                phase_name="verify", role="verify", workdir=workdir,
+                resolver=resolver, explicit_cmd=selected_explicit, force=force,
+                force_provider=force_provider, **command_args, **execution_args,
+            )
+            raise_no_provider_available(result, "verify", "verify")
+        provider_results.append(result)
+        runtime_calls.append(runtime_metadata(result))
+        stdout, stderr, code = result[:3]
         if code != 0:
             return None, f"VERIFY exited {code}: {(stderr or '')[:200]}", stdout
         return try_parse_json(stdout), None, stdout
+
+    def _evidence():
+        return {
+            "execution": {"calls": runtime_calls},
+            "provider_history": provider_history(provider_results),
+        }
 
     try:
         payload, err, stdout = _attempt(prompt)
         if err:
             return {"phase": "verify", "exit_code": 1, "error": err,
-                    "stdout": stdout}
+                    "stdout": stdout, **_evidence()}
         if not _validate(payload):
             payload, err, stdout = _attempt(
                 prompt + "\n\nIMPORTANT: Respond with raw JSON only. "
@@ -95,18 +140,22 @@ def run_verify(findings, review_cmd, workdir, timeout, run=None, branch_point=""
             )
             if err:
                 return {"phase": "verify", "exit_code": 1, "error": err,
-                        "stdout": stdout}
+                        "stdout": stdout, **_evidence()}
             if not _validate(payload):
                 return {
                     "phase": "verify", "exit_code": 1,
                     "results": [], "verdict": "UNKNOWN",
                     "error": "invalid JSON after retry", "stdout": stdout,
+                    **_evidence(),
                 }
         return {
             "phase": "verify", "exit_code": 0,
             "results": payload.get("results", []),
             "verdict": payload.get("verdict", "REJECT"),
             "stdout": stdout,
+            **_evidence(),
         }
+    except NoProviderAvailable:
+        raise
     except Exception as exc:  # defensive: never leak an exception to the loop
         return {"phase": "verify", "exit_code": 1, "error": str(exc)}

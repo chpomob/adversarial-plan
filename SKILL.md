@@ -35,13 +35,16 @@ MERGE  ──→ squash-merge (APPROVED) or [REJECTED] commit
 python3 scripts/adversarial_plan.py \
   --spec <file>              # spec.md to plan (default: <workdir>/spec.md)
   --findings <file>          # optional findings.json from a review
-  --dev-cmd <cmd>            # plan-writer (default: pi ... glm-5.2)
-  --review-cmd <cmd>         # plan-challenger (default: pi ... deepseek)
+  --dev-cmd <cmd>            # plan-writer (default from provider config or env)
+  --review-cmd <cmd>         # plan-challenger (default from provider config or env)
   --workdir <dir>            # default: .
   --max-loops <N>            # default: 2
   --feature <name>           # default: from spec filename
   --timeout <N>              # default: 600
   --out <dir>                # default: .adversarial-plan
+  --provider-config <path>   # external provider config
+  --force                    # bypass all quota checks
+  --force-provider ROLE:ALIAS # force a specific alias for a single role
   --no-merge
 ```
 
@@ -92,14 +95,15 @@ Loaded from adversarial-common/personas/:
 
 ## Integration with dev loop
 
-The output plan.md can be consumed directly by adversarial-code-loop:
+Since `--plan` mode is not wired in the code loop (see pitfall #1 in adversarial-code-loop),
+run each plan step as a separate code loop with `--spec` pointed at a focused spec for that step:
 
 ```bash
 cd ~/.hermes/skills/adversarial-code-loop && python3 scripts/adversarial_loop.py \
-  --plan /path/to/plan.md \
-  --workdir . \
-  --dev-cmd "pi -p --provider zai --model glm-5.2 --thinking high" \
-  --review-cmd "python3 .../claude-tmux.py --yolo --model best ..."
+  --spec /path/to/step-spec.md \
+  --workdir /path/to/repo \
+  --dev-cmd "<writer-command>" \
+  --review-cmd "<reviewer-command>"
 ```
 
 Multi-repo plans: the dev loop's `_resolve_step_workdir()` attempts to detect
@@ -134,3 +138,4 @@ inside a single repo. See adversarial-code-loop pitfall #26.
 - **CHALLENGE phase was embedding the full plan + spec text in the prompt (1000+ lines). Fixed 2026-07-14: reduced to 724 chars by removing the text embedding.** The `_build_prompt()` function in `phase_challenge.py` was concatenating `plan_text` and `spec_text` into the prompt — making the model read redundant text and causing extended-thinking timeouts on large documents. **Fix:** patch `_build_prompt()` to only reference file paths (`plan.md` and `spec.md` are in the current directory) and remove the `--- plan.md ---\n{plan_text}\n--- spec.md ---\n{spec_text}` suffix. The model reads files from disk via `--cwd`. This reduces total prompt size from ~1000+ lines to ~724 chars and eliminates extended-thinking timeouts. **Validated 2026-07-15:** plan challenge completed in ~2 min with Claude Sonnet (vs. 20+ min timeout before the fix).
 - **Claude Fable 5 (2026-07) succeeded as plan-challenger** — a real run produced 4 findings, REQUEST_CHANGES → REVISE → APPROVE with 4/4 settled. If Claude exits code 3 (non-parseable output), fall back to DeepSeek (`pi --provider deepseek --model deepseek-v4-pro`).
 - **Validated end-to-end pairing (2026-07): Codex DEV + Claude Fable 5 REVIEW across ALL stages** — spec (11 findings), plan (4 findings), and code loop. All three stages completed in 1 cycle each. Fable 5 succeeded at both the embedded-prompt JSON pattern (spec/plan challenger) and the files-on-disk pattern (code loop reviewer). Fallback: Codex DEV + DeepSeek REVIEW for spec/plan when Claude quota is exhausted.
+- **Step spec files (step-P*.md) lost by git stash in code loops.** When running plan steps as individual code loops (the current workaround since `--plan` is not wired), each code loop's PHASE 0 runs `git stash push -u` which captures untracked files — including the `step-P*.md` spec files you created for subsequent steps. After the loop's squash-merge and stash pop, these files may vanish or conflict. **Fix:** before launching a multi-step series, add `step-*.md` to the adversarial-plan repo's `.gitignore` so the stash leaves them alone. Alternatively, re-create the next step's spec file from the plan after each completed step.

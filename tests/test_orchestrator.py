@@ -1,5 +1,6 @@
 """Orchestrator unit tests + end-to-end pipeline tests with scripted CLIs."""
 import json
+import shlex
 import subprocess
 import textwrap
 
@@ -7,6 +8,14 @@ import pytest
 
 from conftest import VALID_PLAN, VALID_SPEC
 from scripts import adversarial_plan as orch
+from scripts.phases import phase_challenge, phase_plan, phase_revise, phase_verify
+
+from adversarial_common import (
+    NoProviderAvailable,
+    ProviderConfig,
+    ProviderEntry,
+    RunResult,
+)
 
 
 # --- helpers -------------------------------------------------------------------
@@ -61,6 +70,63 @@ def test_finish_merge_failure_returns_infra_and_records_error(
     assert "squash merge" in final["error"]
 
 
+def test_finish_writes_collected_provider_history(tmp_path, monkeypatch):
+    decision = {
+        "phase": "plan", "alias": "primary", "quota_state": "OK",
+        "fallback": False, "forced": False, "reason": "eligible",
+        "raw_snapshot": {"primary": {"used_pct": 10}},
+    }
+    args = orch.build_parser().parse_args(["--no-merge"])
+    state = {
+        "branch": "plan/demo/1", "parent_branch": "main",
+        "provider_history": [decision],
+    }
+
+    code = orch._finish(
+        args, str(tmp_path), "demo", tmp_path, state, "APPROVED"
+    )
+
+    assert code == orch.EXIT_APPROVED
+    payload = json.loads((tmp_path / "final.json").read_text())
+    assert payload["provider_history"] == [decision]
+
+
+def test_no_provider_available_exits_three_with_snapshots(
+        tmp_path, monkeypatch, capsys):
+    spec = tmp_path / "demo-feature.md"
+    spec.write_text(VALID_SPEC)
+    monkeypatch.setattr(orch, "load_provider_config", lambda _path: None)
+    monkeypatch.setattr(orch.gitops, "ensure_git_available", lambda: (True, ""))
+    monkeypatch.setattr(orch, "resolve_role_cmd", lambda *_args: "echo legacy")
+    monkeypatch.setattr(orch, "_restore", lambda *_args: None)
+
+    def fail(*_args, **_kwargs):
+        raise NoProviderAvailable(
+            "writer",
+            {"one": {"used_pct": 100}, "two": {"status": 429}},
+            {"one": "rate limited", "two": "rate limited"},
+        )
+
+    monkeypatch.setattr(orch, "_pipeline", fail)
+    code = orch.main([
+        "--spec", str(spec), "--workdir", str(tmp_path),
+        "--out", str(tmp_path / "out"),
+    ])
+
+    assert code == orch.EXIT_REJECTED
+    stderr = capsys.readouterr().err
+    assert "no provider available" in stderr
+    assert "one" in stderr and "used_pct" in stderr
+    final = json.loads(
+        (tmp_path / "out" / "demo-feature" / "final.json").read_text()
+    )
+    assert final["verdict"] == "REJECT"
+    assert final["reason"] == "no provider available"
+    assert final["provider_snapshots"] == {
+        "one": {"used_pct": 100}, "two": {"status": 429},
+    }
+
+
 # --- findings loading ---------------------------------------------------------------
 
 def test_load_findings_bare_array(tmp_path):
@@ -110,6 +176,303 @@ def test_parser_defaults():
     assert args.timeout == 600
     assert args.out == ".adversarial-plan"
     assert args.no_merge is False
+
+
+def test_parser_exposes_registry_and_force_options():
+    args = orch.build_parser().parse_args([
+        "--provider-config", "providers.yaml",
+        "--force",
+        "--force-provider", "writer:primary",
+        "--force-provider", "verify:fallback",
+    ])
+    assert args.provider_config == "providers.yaml"
+    assert args.force is True
+    assert args.force_provider == [
+        ("writer", "primary"), ("verify", "fallback"),
+    ]
+
+
+def test_main_loads_config_and_constructs_one_resolver(tmp_path, monkeypatch):
+    seen = {}
+    entry = ProviderEntry(alias="primary", command="echo provider")
+    config = ProviderConfig(
+        roles={
+            "writer": (entry,), "challenger": (entry,), "verify": (entry,),
+        },
+        quota_cmd="quota-check",
+    )
+
+    def load(path):
+        seen["path"] = path
+        return config
+
+    class Resolver:
+        def __init__(self, loaded, quota_cmd):
+            seen["resolver_args"] = (loaded, quota_cmd)
+
+    monkeypatch.setattr(orch, "load_provider_config", load)
+    monkeypatch.setattr(orch, "QuotaResolver", Resolver)
+    code = orch.main([
+        "--workdir", str(tmp_path / "missing"),
+        "--provider-config", str(tmp_path / "providers.yaml"),
+    ])
+
+    assert code == orch.EXIT_USAGE
+    assert seen["path"] == str(tmp_path / "providers.yaml")
+    assert seen["resolver_args"] == (config, config.quota_cmd)
+
+
+def test_all_phases_route_to_registry_roles(tmp_path, git_repo, monkeypatch):
+    calls = []
+    (tmp_path / "plan.md").write_text(VALID_PLAN)
+    (tmp_path / "spec.md").write_text(VALID_SPEC)
+    (git_repo / "plan.md").write_text(VALID_PLAN)
+
+    def run_phase_cmd(**kwargs):
+        calls.append(kwargs)
+        phase = kwargs["phase_name"]
+        if phase == "plan":
+            (git_repo / "plan.md").write_text(VALID_PLAN)
+            stdout = "written"
+        elif phase == "challenge":
+            stdout = json.dumps({
+                "findings": [], "verdict": "APPROVE", "summary": "clean",
+            })
+        elif phase == "revise":
+            (git_repo / "plan.md").write_text(VALID_PLAN)
+            stdout = "revised"
+        else:
+            stdout = json.dumps({"results": [], "verdict": "APPROVE"})
+        return RunResult((stdout, "", 0))
+
+    for module in (phase_plan, phase_challenge, phase_revise, phase_verify):
+        monkeypatch.setattr(module, "run_phase_cmd", run_phase_cmd)
+
+    resolver = object()
+    assert phase_plan.run_plan(
+        VALID_SPEC, None, "", str(git_repo), 10, "demo", resolver
+    )["exit_code"] == 0
+    assert phase_challenge.run_challenge(
+        "", str(tmp_path), 10, resolver
+    )["exit_code"] == 0
+    assert phase_revise.run_revise(
+        [], "", str(git_repo), 10, "demo", 1, resolver
+    )["exit_code"] == 0
+    assert phase_verify.run_verify(
+        [], "", str(tmp_path), 10, resolver
+    )["exit_code"] == 0
+
+    assert [(call["phase_name"], call["role"]) for call in calls] == [
+        ("plan", "writer"), ("challenge", "challenger"),
+        ("revise", "writer"), ("verify", "verify"),
+    ]
+
+
+def test_all_phases_project_scope_legacy_and_explicit_commands(
+        tmp_path, git_repo, monkeypatch):
+    calls = []
+    write_count = 0
+    _stage = tmp_path / "review"
+    _stage.mkdir()
+    (_stage / "plan.md").write_text(VALID_PLAN)
+    (_stage / "spec.md").write_text(VALID_SPEC)
+
+    def run_phase_cmd(**kwargs):
+        nonlocal write_count
+        calls.append(kwargs)
+        phase = kwargs["phase_name"]
+        if phase in {"plan", "revise"}:
+            write_count += 1
+            (git_repo / "plan.md").write_text(
+                VALID_PLAN + f"\n<!-- invocation {write_count} -->\n"
+            )
+            stdout = "written"
+        elif phase == "challenge":
+            stdout = json.dumps({
+                "findings": [], "verdict": "APPROVE", "summary": "clean",
+            })
+        else:
+            stdout = json.dumps({"results": [], "verdict": "APPROVE"})
+        return RunResult((stdout, "", 0))
+
+    for module in (phase_plan, phase_challenge, phase_revise, phase_verify):
+        monkeypatch.setattr(module, "run_phase_cmd", run_phase_cmd)
+
+    def invoke_all(resolver=None, dev_explicit=None, review_explicit=None):
+        assert phase_plan.run_plan(
+            VALID_SPEC, None, "codex exec", str(git_repo), 10, "demo",
+            resolver=resolver, explicit_cmd=dev_explicit,
+        )["exit_code"] == 0
+        assert phase_challenge.run_challenge(
+            "claude --print", str(_stage), 10, resolver=resolver,
+            explicit_cmd=review_explicit,
+        )["exit_code"] == 0
+        assert phase_revise.run_revise(
+            [], "codex exec", str(git_repo), 10, "demo", 1,
+            resolver=resolver, explicit_cmd=dev_explicit,
+        )["exit_code"] == 0
+        assert phase_verify.run_verify(
+            [], "claude --print", str(_stage), 10, resolver=resolver,
+            explicit_cmd=review_explicit,
+        )["exit_code"] == 0
+
+    invoke_all()
+    invoke_all(
+        resolver=object(), dev_explicit="codex exec",
+        review_explicit="claude --print",
+    )
+
+    codex_workdir = f"-C {shlex.quote(str(git_repo))}"
+    assert codex_workdir in calls[0]["cmd"]
+    assert "--allowedTools Read,Bash" in calls[1]["cmd"]
+    assert codex_workdir in calls[2]["cmd"]
+    assert "--allowedTools Read,Bash" in calls[3]["cmd"]
+
+    assert calls[4]["explicit_cmd"].endswith(codex_workdir)
+    assert "--allowedTools Read,Bash" in calls[5]["explicit_cmd"]
+    assert calls[6]["explicit_cmd"].endswith(codex_workdir)
+    assert "--allowedTools Read,Bash" in calls[7]["explicit_cmd"]
+    for call in calls[4:]:
+        assert "cmd" not in call
+
+
+def test_explicit_commands_bypass_only_their_role_groups():
+    args = orch.build_parser().parse_args([
+        "--dev-cmd", "echo writer", "--review-cmd", "echo reviewer",
+        "--force-provider", "writer:w2",
+        "--force-provider", "challenger:c2",
+        "--force-provider", "verify:v2",
+    ])
+    args._force_providers = orch._force_provider_map(args.force_provider)
+
+    assert orch._provider_call_args(args, "writer", args.dev_cmd) == {
+        "explicit_cmd": "echo writer", "force": False, "force_provider": "w2",
+    }
+    assert orch._provider_call_args(args, "challenger", args.review_cmd) == {
+        "explicit_cmd": "echo reviewer", "force": False, "force_provider": "c2",
+    }
+    assert orch._provider_call_args(args, "verify", args.review_cmd) == {
+        "explicit_cmd": "echo reviewer", "force": False, "force_provider": "v2",
+    }
+
+
+def test_explicit_writer_command_skips_resolver(git_repo, tmp_path):
+    class ResolverMustNotRun:
+        def resolve(self, *_args, **_kwargs):
+            raise AssertionError("quota resolver was consulted")
+
+    writer = tmp_path / "writer.py"
+    writer.write_text(WRITER_SCRIPT.format(plan=VALID_PLAN))
+    result = phase_plan.run_plan(
+        VALID_SPEC, None, "unused", str(git_repo), 30, "demo",
+        ResolverMustNotRun(), explicit_cmd=f"python3 {writer}",
+    )
+
+    assert result["exit_code"] == 0
+    assert result["provider_history"] == []
+
+
+def test_delegated_pipeline_resolves_registry_writer_without_dev_cmd(
+        tmp_path, monkeypatch):
+    calls = []
+    resolver = object()
+    args = orch.build_parser().parse_args(["--delegated"])
+    args._provider_resolver = resolver
+    args._force_providers = {}
+
+    def run_phase_cmd(**kwargs):
+        calls.append(kwargs)
+        phase = kwargs["phase_name"]
+        stdout = (
+            json.dumps({"tasks": ["task one", "task two"]})
+            if phase == "decomposition" else f"{phase} output"
+        )
+        decision = {
+            "phase": phase, "alias": "registry-writer", "quota_state": "OK",
+            "fallback": False, "forced": False, "reason": "eligible",
+        }
+        return RunResult(
+            (stdout, "", 0), {"provider_decision": decision}
+        )
+
+    monkeypatch.setattr(orch, "run_phase_cmd", run_phase_cmd)
+    result = orch._run_delegated_pipeline(
+        args, VALID_SPEC, "", str(tmp_path), "demo", tmp_path,
+        {"level": "high", "score": 9, "recommended_agents": 2},
+        ledger=None,
+    )
+
+    assert result["status"] == "synthesized"
+    assert [call["phase_name"] for call in calls] == [
+        "decomposition", "worker", "worker", "synthesis",
+    ]
+    assert all(call["role"] == "writer" for call in calls)
+    assert all(call["resolver"] is resolver for call in calls)
+    assert all(call["explicit_cmd"] is None for call in calls)
+    assert all("cmd" not in call for call in calls)
+    assert [item["phase"] for item in result["provider_history"]] == [
+        "decomposition", "worker", "worker", "synthesis",
+    ]
+
+
+def test_main_delegated_provider_config_without_dev_cmd_uses_registry(
+        tmp_path, monkeypatch):
+    spec = tmp_path / "demo-feature.md"
+    spec.write_text(VALID_SPEC)
+    entry = ProviderEntry(alias="registry-writer", command="echo provider")
+    config = ProviderConfig(
+        roles={
+            "writer": (entry,), "challenger": (entry,), "verify": (entry,),
+        },
+        quota_cmd="quota-check",
+    )
+    resolver = object()
+    calls = []
+
+    monkeypatch.setattr(orch, "load_provider_config", lambda _path: config)
+    monkeypatch.setattr(
+        orch, "QuotaResolver", lambda loaded, quota_cmd: resolver
+    )
+    monkeypatch.setattr(orch.gitops, "ensure_git_available", lambda: (True, ""))
+    monkeypatch.setattr(orch, "_restore", lambda *_args: None)
+
+    def run_phase_cmd(**kwargs):
+        calls.append(kwargs)
+        phase = kwargs["phase_name"]
+        stdout = (
+            json.dumps({"tasks": ["task one", "task two"]})
+            if phase == "decomposition" else f"{phase} output"
+        )
+        return RunResult((stdout, "", 0))
+
+    def pipeline(args, dev_cmd, _review_cmd, workdir, feature, out_dir,
+                 spec_text, *_args, **_kwargs):
+        assert args.delegated is True
+        assert dev_cmd == ""
+        result = orch._run_delegated_pipeline(
+            args, spec_text, dev_cmd, workdir, feature, out_dir,
+            {"level": "high", "score": 9, "recommended_agents": 2},
+            ledger=None,
+        )
+        assert result["status"] == "synthesized"
+        return orch.EXIT_APPROVED
+
+    monkeypatch.setattr(orch, "run_phase_cmd", run_phase_cmd)
+    monkeypatch.setattr(orch, "_pipeline", pipeline)
+
+    code = orch.main([
+        "--spec", str(spec), "--workdir", str(tmp_path),
+        "--out", str(tmp_path / "out"), "--delegated",
+        "--provider-config", str(tmp_path / "providers.yaml"),
+    ])
+
+    assert code == orch.EXIT_APPROVED
+    assert [call["phase_name"] for call in calls] == [
+        "decomposition", "worker", "worker", "synthesis",
+    ]
+    assert all(call["resolver"] is resolver for call in calls)
+    assert all(call["explicit_cmd"] is None for call in calls)
+    assert all("cmd" not in call for call in calls)
 
 
 def test_derive_feature_prefers_flag_then_spec_filename():

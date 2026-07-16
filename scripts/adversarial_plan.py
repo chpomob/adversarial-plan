@@ -47,7 +47,18 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_SCRIPTS_DIR.parent))
 sys.path.insert(0, str(_SCRIPTS_DIR.parent.parent / "adversarial-common"))
 
-from adversarial_common import costs, gates, gitops, jsonio
+from adversarial_common import (
+    NoProviderAvailable,
+    ProviderConfigError,
+    QuotaResolver,
+    collect_provider_history,
+    costs,
+    gates,
+    gitops,
+    jsonio,
+    load_provider_config,
+    run_phase_cmd,
+)
 from adversarial_common.providers import resolve_role_cmd
 from adversarial_common.runner import (
     CI_EXIT_BLOCKING, CI_EXIT_CLEAN, CI_EXIT_CONTEXT_BLOCKED,
@@ -73,6 +84,7 @@ _SETTLED_STATUSES = {"resolved", "rejected"}
 
 # Complexity delegation threshold (R5 "high" tier).
 _DELEGATE_COMPLEXITY = "high"
+_FORCE_PROVIDER_ROLES = frozenset({"challenger", "verify", "writer"})
 
 
 # --- small helpers -------------------------------------------------------------
@@ -108,6 +120,23 @@ def _unresolved(findings, results):
         if r.get("id") is not None and r.get("status") in _SETTLED_STATUSES
     }
     return [f for f in findings if f.get("id") not in settled]
+
+
+def _record_provider_history(state, result):
+    """Append normalized phase decisions to the run-wide audit trail."""
+    history = result.get("provider_history", []) if isinstance(result, dict) else []
+    for decision in history:
+        if isinstance(decision, dict):
+            state.setdefault("provider_history", []).append(dict(decision))
+
+
+def _provider_call_args(args, role, explicit_cmd):
+    """Return provider controls shared by every invocation of *role*."""
+    return {
+        "explicit_cmd": explicit_cmd,
+        "force": bool(getattr(args, "force", False)),
+        "force_provider": getattr(args, "_force_providers", {}).get(role),
+    }
 
 
 def _log_retrospective(label, result, feature, branch, out_dir):
@@ -410,8 +439,10 @@ def _finish(args, workdir, feature, out_dir, state, verdict, reason="", loops=0,
     final_payload = ensure_final_payload(
         verdict=verdict,
         infrastructure=bool(error),
+        provider_history=state.get("provider_history", []),
         **{k: v for k, v in final_kwargs.items() if k != "verdict"},
     )
+    final_payload.pop("verdict", None)
     jsonio.write_final_json(out_dir, verdict, **final_payload)
 
     # --html: render report after final.json
@@ -500,6 +531,75 @@ def _run_deep_research(args, spec_text, dev_cmd, workdir, feature, out_dir, ledg
 
 # --- delegated execution (R11) -------------------------------------------------
 
+def _delegated_payload_text(payload):
+    """Serialize a delegated stage payload without recursive result tuples."""
+    if isinstance(payload, str):
+        return payload
+
+    def json_safe(value):
+        if isinstance(value, dict):
+            return {
+                str(key): json_safe(item) for key, item in value.items()
+                if key != "result"
+            }
+        if isinstance(value, (list, tuple)):
+            return [json_safe(item) for item in value]
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        return str(value)
+
+    return json.dumps(json_safe(payload), ensure_ascii=False, sort_keys=True)
+
+
+def _delegated_phase_call(args, dev_cmd, workdir, ledger, phase):
+    """Build a delegated call factory that resolves the writer at run time."""
+    resolver = getattr(args, "_provider_resolver", None)
+    # ``main`` normalizes the explicit override into dev_cmd.  In registry
+    # mode an empty value must remain ``None`` so run_phase_cmd consults the
+    # resolver; in legacy mode the selected/default command is supplied below
+    # through the backward-compatible ``cmd`` argument.
+    explicit_cmd = (dev_cmd or None) if resolver is not None else None
+    provider_args = _provider_call_args(args, "writer", explicit_cmd)
+
+    def call(payload):
+        def invoke():
+            command_args = {}
+            if resolver is None:
+                command_args["cmd"] = dev_cmd
+            return run_phase_cmd(
+                phase_name=phase,
+                role="writer",
+                workdir=workdir,
+                resolver=resolver,
+                stdin_text=_delegated_payload_text(payload),
+                timeout=args.timeout,
+                ledger=ledger,
+                persona="plan-writer",
+                max_retries=args.retries,
+                **provider_args,
+                **command_args,
+            )
+
+        return invoke
+
+    return call
+
+
+def _delegated_provider_history(result):
+    """Collect provider decisions retained in delegated call records."""
+    calls = []
+    for key in ("decomposition", "fallback"):
+        record = result.get(key)
+        if isinstance(record, dict) and record.get("result") is not None:
+            calls.append(record["result"])
+    for record in result.get("workers", []):
+        if isinstance(record, dict) and record.get("result") is not None:
+            calls.append(record["result"])
+    synthesis = result.get("synthesis")
+    if isinstance(synthesis, dict) and synthesis.get("result") is not None:
+        calls.append(synthesis["result"])
+    return collect_provider_history(calls)
+
 def _run_delegated_pipeline(args, spec_text, dev_cmd, workdir, feature,
                             out_dir, complexity, ledger):
     """Delegate a high-complexity spec to worker decomposition + synthesis.
@@ -512,43 +612,21 @@ def _run_delegated_pipeline(args, spec_text, dev_cmd, workdir, feature,
     ci_print(f"  Delegating: complexity={complexity.get('level')} "
              f"(score={complexity.get('score')})")
 
-    decomposition_call = {
-        "cmd": dev_cmd,
-        "timeout": args.timeout,
-        "cwd": workdir,
-        "ledger": ledger,
-        "phase": "decomposition",
-        "persona": "plan-writer",
-        "max_retries": args.retries,
-    }
-    worker_call = {
-        "cmd": dev_cmd,
-        "timeout": args.timeout,
-        "cwd": workdir,
-        "ledger": ledger,
-        "phase": "worker",
-        "persona": "plan-writer",
-        "max_retries": args.retries,
-    }
-    synthesis_call = {
-        "cmd": dev_cmd,
-        "timeout": args.timeout,
-        "cwd": workdir,
-        "ledger": ledger,
-        "phase": "synthesis",
-        "persona": "plan-writer",
-        "max_retries": args.retries,
-    }
-    # Fallback: run the standard plan phase
-    fallback_call = {
-        "cmd": dev_cmd,
-        "timeout": args.timeout,
-        "cwd": workdir,
-        "ledger": ledger,
-        "phase": "plan",
-        "persona": "plan-writer",
-        "max_retries": args.retries,
-    }
+    # Factories defer command selection until each stage starts. This keeps
+    # delegated execution on the same quota-aware path as ordinary phases,
+    # while an explicit --dev-cmd remains a writer-role bypass.
+    decomposition_call = _delegated_phase_call(
+        args, dev_cmd, workdir, ledger, "decomposition"
+    )
+    worker_call = _delegated_phase_call(
+        args, dev_cmd, workdir, ledger, "worker"
+    )
+    synthesis_call = _delegated_phase_call(
+        args, dev_cmd, workdir, ledger, "synthesis"
+    )
+    fallback_call = _delegated_phase_call(
+        args, dev_cmd, workdir, ledger, "plan"
+    )
 
     result = run_delegated(
         spec_text,
@@ -560,6 +638,7 @@ def _run_delegated_pipeline(args, spec_text, dev_cmd, workdir, feature,
         max_concurrency=6,
         complexity=complexity,
     )
+    result["provider_history"] = _delegated_provider_history(result)
     _write_json(out_dir, "00_delegated.json", result)
     status = result.get("status", "unknown")
     ci_print(f"  Delegated: {status}, mode={result.get('mode', 'direct')}")
@@ -582,6 +661,7 @@ def _pipeline(args, dev_cmd, review_cmd, workdir, feature, out_dir,
     # --- cost ledger + complexity (R4) ---
     ledger = costs.CostLedger()
     complexity = gates.estimate_complexity(spec_text)
+    state.setdefault("provider_history", [])
 
     # --- deep research (R10) ---
     research_result = None
@@ -617,6 +697,7 @@ def _pipeline(args, dev_cmd, review_cmd, workdir, feature, out_dir,
         delegated_result = _run_delegated_pipeline(
             args, spec_text, dev_cmd, workdir, feature, out_dir,
             complexity, ledger)
+        _record_provider_history(state, delegated_result)
         # If delegated succeeded, skip the normal pipeline and finalize
         if delegated_result.get("status") in ("synthesized", "complete"):
             merged = delegated_result.get("delegated", False)
@@ -650,11 +731,14 @@ def _pipeline(args, dev_cmd, review_cmd, workdir, feature, out_dir,
     _banner("PLAN  (PLAN-WRITER)", ci)
     plan = phase_plan.run_plan(spec_text, findings, dev_cmd, workdir,
                                args.timeout, feature,
+                               getattr(args, "_provider_resolver", None),
+                               **_provider_call_args(args, "writer", args.dev_cmd),
                                ledger=ledger, show_costs=args.show_costs,
                                max_retries=args.retries,
                                max_input_chars=args.max_input_chars,
                                max_output_chars=args.max_output_chars)
     _write_json(out_dir, "01_plan.json", plan)
+    _record_provider_history(state, plan)
     if plan["exit_code"] != 0:
         if plan.get("exit_code") == EXIT_USAGE:
             ci_print(f"X plan validation failed: {plan.get('error', 'invalid plan')}")
@@ -666,12 +750,15 @@ def _pipeline(args, dev_cmd, review_cmd, workdir, feature, out_dir,
     _banner("CHALLENGE  (PLAN-CHALLENGER)", ci)
     challenge = phase_challenge.run_challenge(
         review_cmd, workdir, args.timeout,
+        getattr(args, "_provider_resolver", None),
         branch_point=state["branch_point"],
+        **_provider_call_args(args, "challenger", args.review_cmd),
         ledger=ledger, show_costs=args.show_costs,
         max_retries=args.retries,
         max_input_chars=args.max_input_chars,
         max_output_chars=args.max_output_chars)
     _write_json(out_dir, "02_challenge.json", challenge)
+    _record_provider_history(state, challenge)
     if challenge["exit_code"] != 0:
         return _phase_failed("challenge", challenge, state, out_dir)
     # R5: normalize epistemic labels on challenge findings
@@ -692,23 +779,30 @@ def _pipeline(args, dev_cmd, review_cmd, workdir, feature, out_dir,
         _banner(f"REVISE  (round {n}/{args.max_loops})", ci)
         revise = phase_revise.run_revise(challenge_findings, dev_cmd, workdir,
                                          args.timeout, feature, n,
+                                         getattr(args, "_provider_resolver", None),
+                                         **_provider_call_args(
+                                             args, "writer", args.dev_cmd),
                                          ledger=ledger, show_costs=args.show_costs,
                                          max_retries=args.retries,
                                          max_input_chars=args.max_input_chars,
                                          max_output_chars=args.max_output_chars)
         _write_json(out_dir, f"03_revise_{n}.json", revise)
+        _record_provider_history(state, revise)
         if revise["exit_code"] != 0:
             return _phase_failed(f"revise_{n}", revise, state, out_dir)
 
         _banner(f"VERIFY  (round {n}/{args.max_loops})", ci)
         verify = phase_verify.run_verify(
             challenge_findings, review_cmd, workdir, args.timeout,
+            getattr(args, "_provider_resolver", None),
             branch_point=state["branch_point"],
+            **_provider_call_args(args, "verify", args.review_cmd),
             ledger=ledger, show_costs=args.show_costs,
             max_retries=args.retries,
             max_input_chars=args.max_input_chars,
             max_output_chars=args.max_output_chars)
         _write_json(out_dir, f"04_verify_{n}.json", verify)
+        _record_provider_history(state, verify)
         if verify["exit_code"] != 0:
             return _phase_failed(f"verify_{n}", verify, state, out_dir)
         # R5: normalize epistemic labels on verify results
@@ -759,6 +853,29 @@ def _positive_int(value):
     return ivalue
 
 
+def _force_provider_value(value):
+    """argparse type for repeatable ``ROLE:ALIAS`` provider overrides."""
+    role, separator, alias = value.partition(":")
+    role = role.strip().lower()
+    alias = alias.strip()
+    if not separator or role not in _FORCE_PROVIDER_ROLES or not alias:
+        allowed = ", ".join(sorted(_FORCE_PROVIDER_ROLES))
+        raise argparse.ArgumentTypeError(
+            f"expected <role>:<alias> with role in: {allowed}"
+        )
+    return role, alias
+
+
+def _force_provider_map(values):
+    """Validate repeatable overrides and return one alias per role."""
+    result = {}
+    for role, alias in values:
+        if role in result:
+            raise ValueError(f"--force-provider specified more than once for {role}")
+        result[role] = alias
+    return result
+
+
 def build_parser():
     p = argparse.ArgumentParser(
         description="Adversarial Plan "
@@ -773,6 +890,19 @@ def build_parser():
     p.add_argument("--review-cmd", default=None,
                    help=f"plan-challenger command (default: $APLAN_REVIEW_CMD "
                         f"or '{DEFAULT_REVIEW_CMD}')")
+    p.add_argument(
+        "--provider-config", default=None, metavar="PATH",
+        help="provider registry YAML (env: ADVERSARIAL_PROVIDER_CONFIG)",
+    )
+    p.add_argument(
+        "--force", action="store_true",
+        help="skip quota checks and select each role's primary provider",
+    )
+    p.add_argument(
+        "--force-provider", action="append", default=[],
+        type=_force_provider_value, metavar="ROLE:ALIAS",
+        help="force an alias for one role; repeat for multiple roles",
+    )
     p.add_argument("--workdir", default=".", help="Target directory (default: .)")
     p.add_argument("--max-loops", type=_positive_int, default=2)
     p.add_argument("--feature", default=None,
@@ -868,6 +998,24 @@ def _load_findings(path):
 def main(argv=None):
     args = build_parser().parse_args(argv)
 
+    try:
+        args._force_providers = _force_provider_map(args.force_provider)
+        args._provider_config = load_provider_config(args.provider_config)
+        if args._provider_config is None:
+            args._provider_resolver = None
+        else:
+            if not args._provider_config.quota_cmd:
+                raise ProviderConfigError(
+                    "PROVIDER_CONFIG_QUOTA_CMD_REQUIRED",
+                    "quota_cmd is required when adversarial-plan uses a provider registry",
+                )
+            args._provider_resolver = QuotaResolver(
+                args._provider_config, args._provider_config.quota_cmd
+            )
+    except (ProviderConfigError, TypeError, ValueError) as exc:
+        ci_print(f"X invalid provider configuration: {exc}", enabled=True)
+        return EXIT_USAGE
+
     workdir = str(Path(args.workdir).resolve())
     if not os.path.isdir(workdir):
         ci_print(f"X Workdir not found: {args.workdir}", enabled=args.ci)
@@ -895,10 +1043,17 @@ def main(argv=None):
         ci_print(f"X {info}", enabled=args.ci)
         return EXIT_INFRA
 
-    dev_cmd = resolve_role_cmd("dev", args.dev_cmd, "APLAN_DEV_CMD",
-                               DEFAULT_DEV_CMD)
-    review_cmd = resolve_role_cmd("review", args.review_cmd, "APLAN_REVIEW_CMD",
-                                  DEFAULT_REVIEW_CMD)
+    if args._provider_config is None:
+        dev_cmd = resolve_role_cmd("dev", args.dev_cmd, "APLAN_DEV_CMD",
+                                   DEFAULT_DEV_CMD)
+        review_cmd = resolve_role_cmd(
+            "review", args.review_cmd, "APLAN_REVIEW_CMD", DEFAULT_REVIEW_CMD
+        )
+    else:
+        # Registry commands are selected immediately before each phase. Only
+        # explicit legacy flags are retained here as per-role bypasses.
+        dev_cmd = (args.dev_cmd or "").strip()
+        review_cmd = (args.review_cmd or "").strip()
 
     feature = _derive_feature(args, spec_text)
     if not feature:
@@ -911,10 +1066,11 @@ def main(argv=None):
     out_dir = out_base / feature
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    provider_mode = "registry" if args._provider_resolver is not None else "legacy"
     ci_print(f"\n{'#' * 60}\n  ADVERSARIAL PLAN\n"
              f"  Feature: {feature}\n  Max loops: {args.max_loops}\n"
              f"  Findings input: {'yes' if findings is not None else 'no'}\n"
-             f"  WRITER: {dev_cmd[:60]}\n  CHALLENGER: {review_cmd[:60]}\n{'#' * 60}",
+             f"  Provider mode: {provider_mode}\n{'#' * 60}",
              enabled=not args.ci)
 
     state = {}
@@ -927,6 +1083,36 @@ def main(argv=None):
     except KeyboardInterrupt:
         ci_print("\nX Interrupted — restoring workdir (plan branch kept)", enabled=args.ci)
         code = CI_EXIT_INFRASTRUCTURE if args.ci else EXIT_INFRA
+    except NoProviderAvailable as exc:
+        ci_print(f"X no provider available for role '{exc.role}'", enabled=True)
+        aliases = set(exc.snapshots) | set(exc.reasons)
+        for alias in sorted(aliases):
+            snapshot = json.dumps(
+                exc.snapshots.get(alias, {}), sort_keys=True, default=str
+            )
+            ci_print(
+                f"  {alias}: {exc.reasons.get(alias, 'ineligible')}; "
+                f"snapshot={snapshot}", enabled=True,
+            )
+        decision = getattr(exc, "provider_decision", None)
+        if isinstance(decision, dict):
+            state.setdefault("provider_history", []).append(dict(decision))
+        snapshots = json.loads(json.dumps(exc.snapshots, default=str))
+        reasons = dict(exc.reasons)
+        jsonio.save_artifact(
+            out_dir, "final.md",
+            _final_md("REJECT", feature, 0, "no provider available"),
+        )
+        payload = ensure_final_payload(
+            verdict="REJECT", reason="no provider available", loops=0,
+            branch=state.get("branch", ""), merged=False,
+            artifacts_dir=str(out_dir), infrastructure=False,
+            provider_history=state.get("provider_history", []),
+            provider_snapshots=snapshots, provider_reasons=reasons,
+        )
+        payload.pop("verdict", None)
+        jsonio.write_final_json(out_dir, "REJECT", **payload)
+        code = EXIT_REJECTED
     except gitops.GitError as exc:
         ci_print(f"\nX git error: {exc}", enabled=args.ci)
         code = CI_EXIT_INFRASTRUCTURE if args.ci else EXIT_INFRA
